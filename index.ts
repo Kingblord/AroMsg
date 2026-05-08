@@ -53,9 +53,10 @@ async function createSession(userId: string) {
       version,
       logger: P({ level: "silent" }),
       printQRInTerminal: false,
-      // Better reconnection settings
-      reconnectInterval: 5000,
+      // Valid reconnection settings
+      connectTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
+      retryRequestDelayMs: 5000,
     });
 
     sessions[userId] = { sock, connected: false };
@@ -88,7 +89,7 @@ async function createSession(userId: string) {
 
         if (shouldReconnect) {
           console.log(`🔄 Reconnecting ${userId}...`);
-          setTimeout(() => createSession(userId), 2000);
+          setTimeout(() => createSession(userId), 3000);
         }
       }
     });
@@ -107,7 +108,7 @@ async function createSession(userId: string) {
         msg.message.imageMessage?.caption ||
         msg.message.videoMessage?.caption;
 
-      if (!text) return;
+      if (!text?.trim()) return;
 
       console.log(`📨 Message from ${from}: ${text}`);
 
@@ -133,7 +134,6 @@ async function createSession(userId: string) {
 // ROUTES
 // ========================
 
-// Connect / Restore session
 app.post("/connect", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "userId required" });
@@ -145,7 +145,6 @@ app.post("/connect", async (req, res) => {
   res.json({ success: true });
 });
 
-// Get QR Code
 app.get("/qr/:userId", (req, res) => {
   const { userId } = req.params;
   const session = sessions[userId];
@@ -160,7 +159,6 @@ app.get("/qr/:userId", (req, res) => {
   });
 });
 
-// Get status
 app.get("/status/:userId", (req, res) => {
   const { userId } = req.params;
   const session = sessions[userId];
@@ -171,22 +169,19 @@ app.get("/status/:userId", (req, res) => {
   });
 });
 
-// Send message
 app.post("/send-message", async (req, res) => {
   try {
     const { userId, to, text } = req.body;
-
     if (!userId || !to || !text) {
       return res.status(400).json({ error: "Missing fields" });
     }
 
     const session = sessions[userId];
     if (!session?.sock) {
-      return res.status(404).json({ error: "Session not found" });
+      return res.status(404).json({ error: "Session not found or not connected" });
     }
 
     await session.sock.sendMessage(to, { text });
-
     res.json({ success: true });
   } catch (err: any) {
     console.error("Send message error:", err);
@@ -194,7 +189,6 @@ app.post("/send-message", async (req, res) => {
   }
 });
 
-// Disconnect
 app.post("/disconnect", async (req, res) => {
   const { userId } = req.body;
   const session = sessions[userId];
@@ -211,10 +205,8 @@ app.post("/disconnect", async (req, res) => {
   res.json({ success: true });
 });
 
-// Health check
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
-// Start server
 app.listen(PORT, () => {
   console.log(`🚀 WhatsApp Gateway running on port ${PORT}`);
 });
