@@ -21,13 +21,9 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 const AI_BACKEND_URL = process.env.AI_BACKEND_URL; // e.g. https://yourapp.vercel.app
-const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY; // Shared secret with Next.js backend
 
 if (!AI_BACKEND_URL) {
   console.warn("[gateway] WARNING: AI_BACKEND_URL is not set — webhooks will not be forwarded");
-}
-if (!GATEWAY_API_KEY) {
-  console.warn("[gateway] WARNING: GATEWAY_API_KEY is not set — webhook calls will be unauthenticated");
 }
 
 // Ensure sessions directory exists
@@ -65,10 +61,7 @@ async function forwardToBackend(payload: {
   try {
     await axios.post(
       webhookUrl,
-      {
-        ...payload,
-        apiKey: GATEWAY_API_KEY, // Send API key for authentication on backend
-      },
+      { ...payload },
       {
         timeout: 15000,
         headers: { "Content-Type": "application/json" },
@@ -306,6 +299,7 @@ app.get("/health", (_, res) =>
     status: "ok",
     sessions: Object.keys(sessions).length,
     backendUrl: AI_BACKEND_URL || "NOT SET",
+    authenticated: false,
   })
 );
 
@@ -314,107 +308,5 @@ app.listen(PORT, () => {
   console.log(`[gateway] Forwarding webhooks to: ${AI_BACKEND_URL}/api/whatsapp/webhook`);
 });
 
-        msg.message.videoMessage?.caption;
 
-      if (!text?.trim()) return;
 
-      console.log(`📨 Message from ${from}: ${text}`);
-
-      try {
-        await axios.post(`${AI_BACKEND_URL}/webhook`, {
-          userId,
-          from,
-          text,
-          platform: "whatsapp",
-          messageId: msg.key.id,
-          timestamp: msg.messageTimestamp,
-        });
-      } catch (err) {
-        console.error("❌ Failed to forward to backend:", err);
-      }
-    });
-  } catch (err) {
-    console.error(`Failed to create session for ${userId}:`, err);
-  }
-}
-
-// ========================
-// ROUTES
-// ========================
-
-app.post("/connect", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "userId required" });
-
-  if (!sessions[userId]) {
-    await createSession(userId);
-  }
-
-  res.json({ success: true });
-});
-
-app.get("/qr/:userId", (req, res) => {
-  const { userId } = req.params;
-  const session = sessions[userId];
-
-  if (!session) {
-    return res.status(404).json({ error: "Session not found" });
-  }
-
-  res.json({
-    qr: session.qr,
-    connected: session.connected,
-  });
-});
-
-app.get("/status/:userId", (req, res) => {
-  const { userId } = req.params;
-  const session = sessions[userId];
-
-  res.json({
-    connected: session?.connected || false,
-    phoneNumber: session?.phoneNumber || null,
-  });
-});
-
-app.post("/send-message", async (req, res) => {
-  try {
-    const { userId, to, text } = req.body;
-    if (!userId || !to || !text) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-
-    const session = sessions[userId];
-    if (!session?.sock) {
-      return res.status(404).json({ error: "Session not found or not connected" });
-    }
-
-    await session.sock.sendMessage(to, { text });
-    res.json({ success: true });
-  } catch (err: any) {
-    console.error("Send message error:", err);
-    res.status(500).json({ error: err.message || "Send failed" });
-  }
-});
-
-app.post("/disconnect", async (req, res) => {
-  const { userId } = req.body;
-  const session = sessions[userId];
-
-  if (session) {
-    try {
-      await session.sock.logout();
-    } catch (e) {
-      console.error("Logout error:", e);
-    }
-    delete sessions[userId];
-  }
-
-  res.json({ success: true });
-});
-
-app.get("/health", (_, res) => res.json({ status: "ok" }));
-
-app.listen(PORT, () => {
-  console.log(`🚀 WhatsApp Gateway running on port ${PORT}`);
-});
