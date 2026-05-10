@@ -212,7 +212,8 @@ app.post("/connect", async (req, res) => {
 });
 
 // GET /qr/:userId — return QR code image as data URL
-app.get("/qr/:userId", (req, res) => {
+// Waits up to 15s for QR to be generated (handles the async race)
+app.get("/qr/:userId", async (req, res) => {
   const { userId } = req.params;
   const session = sessions[userId];
 
@@ -220,10 +221,36 @@ app.get("/qr/:userId", (req, res) => {
     return res.status(404).json({ error: "Session not found. Call /connect first." });
   }
 
+  // Already connected — no QR needed
+  if (session.connected) {
+    return res.json({ qr: null, connected: true, phoneNumber: session.phoneNumber || null });
+  }
+
+  // QR already ready — return immediately
+  if (session.qr) {
+    return res.json({ qr: session.qr, connected: false, phoneNumber: null });
+  }
+
+  // QR not ready yet — wait up to 15s for it to appear (Baileys fires it async)
+  const maxWaitMs = 15_000;
+  const intervalMs = 250;
+  let waited = 0;
+
+  await new Promise<void>((resolve) => {
+    const check = setInterval(() => {
+      waited += intervalMs;
+      if (sessions[userId]?.qr || sessions[userId]?.connected || waited >= maxWaitMs) {
+        clearInterval(check);
+        resolve();
+      }
+    }, intervalMs);
+  });
+
+  const updated = sessions[userId];
   res.json({
-    qr: session.qr || null,
-    connected: session.connected,
-    phoneNumber: session.phoneNumber || null,
+    qr: updated?.qr || null,
+    connected: updated?.connected || false,
+    phoneNumber: updated?.phoneNumber || null,
   });
 });
 
@@ -307,6 +334,5 @@ app.listen(PORT, () => {
   console.log(`[gateway] WhatsApp Gateway running on port ${PORT}`);
   console.log(`[gateway] Forwarding webhooks to: ${AI_BACKEND_URL}/api/whatsapp/webhook`);
 });
-
 
 
