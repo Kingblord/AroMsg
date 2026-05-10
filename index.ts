@@ -178,7 +178,7 @@ async function createSession(userId: string) {
         userId,
         from,
         text,
-        messageId: msg.key.id,
+        messageId: msg.key.id ?? undefined,
         timestamp: Number(msg.messageTimestamp) * 1000, // ms
         platform: "whatsapp",
       });
