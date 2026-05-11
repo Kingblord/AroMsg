@@ -16,197 +16,484 @@ import QRCode from "qrcode";
 dotenv.config();
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
-const AI_BACKEND_URL = process.env.AI_BACKEND_URL;
 
-if (!AI_BACKEND_URL) {
-  console.warn("⚠️ AI_BACKEND_URL is not set");
+const BACKEND_URL =
+  process.env.BACKEND_URL;
+
+const INTERNAL_API_KEY =
+  process.env.INTERNAL_API_KEY;
+
+if (!BACKEND_URL) {
+  console.warn(
+    "⚠️ BACKEND_URL missing"
+  );
 }
 
-// Ensure sessions directory exists
-mkdirSync("sessions", { recursive: true });
+mkdirSync("sessions", {
+  recursive: true,
+});
 
-// In-memory session store
+// ========================
+// SESSION STORE
+// ========================
+
 interface SessionData {
   sock: any;
   qr?: string;
   connected: boolean;
   phoneNumber?: string;
+  reconnecting?: boolean;
 }
 
-const sessions: Record<string, SessionData> = {};
+const sessions:
+  Record<string, SessionData> = {};
 
 // ========================
-// CREATE / RESTORE SESSION
+// CREATE SESSION
 // ========================
-async function createSession(userId: string) {
+
+async function createSession(
+  userId: string
+) {
+
   try {
-    const { state, saveCreds } = await useMultiFileAuthState(`sessions/${userId}`);
 
-    const { version } = await fetchLatestBaileysVersion();
+    const { state, saveCreds } =
+      await useMultiFileAuthState(
+        `sessions/${userId}`
+      );
+
+    const { version } =
+      await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
       auth: state,
       version,
-      logger: P({ level: "silent" }),
+      logger: P({
+        level: "silent",
+      }),
       printQRInTerminal: false,
-      // Valid reconnection settings
       connectTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
       retryRequestDelayMs: 5000,
     });
 
-    sessions[userId] = { sock, connected: false };
+    sessions[userId] = {
+      sock,
+      connected: false,
+      reconnecting: false,
+    };
 
-    // Save credentials
-    sock.ev.on("creds.update", saveCreds);
+    // ========================
+    // SAVE CREDS
+    // ========================
 
-    // Connection events
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, qr, lastDisconnect } = update;
+    sock.ev.on(
+      "creds.update",
+      saveCreds
+    );
 
-      if (qr) {
-        const qrImage = await QRCode.toDataURL(qr);
-        sessions[userId].qr = qrImage;
-        console.log(`📱 QR generated for user: ${userId}`);
-      }
+    // ========================
+    // CONNECTION EVENTS
+    // ========================
 
-      if (connection === "open") {
-        sessions[userId].connected = true;
-        sessions[userId].phoneNumber = sock.user?.id?.split(":")[0] || "";
-        console.log(`✅ Connected: ${userId} | ${sessions[userId].phoneNumber}`);
-      }
+    sock.ev.on(
+      "connection.update",
+      async (update) => {
 
-      if (connection === "close") {
-        sessions[userId].connected = false;
-        const shouldReconnect =
-          (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
+        const {
+          connection,
+          qr,
+          lastDisconnect,
+        } = update;
 
-        console.log(`❌ Disconnected: ${userId}`);
+        // QR GENERATED
+        if (qr) {
 
-        if (shouldReconnect) {
-          console.log(`🔄 Reconnecting ${userId}...`);
-          setTimeout(() => createSession(userId), 3000);
+          const qrImage =
+            await QRCode.toDataURL(qr);
+
+          sessions[userId].qr =
+            qrImage;
+
+          console.log(
+            `📱 QR generated: ${userId}`
+          );
+        }
+
+        // CONNECTED
+        if (connection === "open") {
+
+          sessions[userId].connected =
+            true;
+
+          sessions[userId].reconnecting =
+            false;
+
+          sessions[userId].phoneNumber =
+            sock.user?.id
+              ?.split(":")[0] || "";
+
+          console.log(
+            `✅ Connected: ${userId}`
+          );
+        }
+
+        // DISCONNECTED
+        if (connection === "close") {
+
+          sessions[userId].connected =
+            false;
+
+          const shouldReconnect =
+            (lastDisconnect?.error as any)
+              ?.output?.statusCode !==
+            DisconnectReason.loggedOut;
+
+          console.log(
+            `❌ Disconnected: ${userId}`
+          );
+
+          if (
+            shouldReconnect &&
+            !sessions[userId]
+              ?.reconnecting
+          ) {
+
+            sessions[userId]
+              .reconnecting = true;
+
+            console.log(
+              `🔄 Reconnecting ${userId}`
+            );
+
+            setTimeout(() => {
+              createSession(userId);
+            }, 3000);
+          }
         }
       }
-    });
+    );
 
-    // Message handler
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-      const msg = messages[0];
-      if (!msg.message || !msg.key.remoteJid) return;
+    // ========================
+    // MESSAGE EVENTS
+    // ========================
 
-      const from = msg.key.remoteJid;
-      if (from.endsWith("@g.us")) return; // Ignore groups
+    sock.ev.on(
+      "messages.upsert",
+      async ({ messages }) => {
 
-      const text =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        msg.message.videoMessage?.caption;
+        try {
 
-      if (!text?.trim()) return;
+          const msg = messages[0];
 
-      console.log(`📨 Message from ${from}: ${text}`);
+          if (!msg?.message) return;
 
-      try {
-        await axios.post(`${AI_BACKEND_URL}/webhook`, {
-          userId,
-          from,
-          text,
-          platform: "whatsapp",
-          messageId: msg.key.id,
-          timestamp: msg.messageTimestamp,
-        });
-      } catch (err) {
-        console.error("❌ Failed to forward to backend:", err);
+          // IGNORE OWN MESSAGES
+          if (msg.key.fromMe) return;
+
+          const from =
+            msg.key.remoteJid;
+
+          if (!from) return;
+
+          // IGNORE GROUPS
+          if (
+            from.endsWith("@g.us")
+          ) {
+            return;
+          }
+
+          const text =
+            msg.message.conversation ||
+            msg.message
+              .extendedTextMessage
+              ?.text ||
+            msg.message.imageMessage
+              ?.caption ||
+            msg.message.videoMessage
+              ?.caption;
+
+          if (!text?.trim()) {
+            return;
+          }
+
+          console.log(
+            `📨 ${from}: ${text}`
+          );
+
+          // ========================
+          // SEND DIRECTLY TO BACKEND
+          // ========================
+
+          await axios.post(
+            `${BACKEND_URL}/api/internal/receive-message`,
+            {
+              userId,
+              from,
+              text,
+              platform: "whatsapp",
+              messageId:
+                msg.key.id,
+              timestamp:
+                msg.messageTimestamp,
+            },
+            {
+              headers: {
+                Authorization:
+                  `Bearer ${INTERNAL_API_KEY}`,
+              },
+            }
+          );
+
+        } catch (err) {
+
+          console.error(
+            "❌ Message processing error:",
+            err
+          );
+        }
       }
-    });
+    );
+
   } catch (err) {
-    console.error(`Failed to create session for ${userId}:`, err);
+
+    console.error(
+      `❌ Session creation failed: ${userId}`,
+      err
+    );
   }
 }
 
 // ========================
-// ROUTES
+// CONNECT
 // ========================
 
-app.post("/connect", async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: "userId required" });
+app.post(
+  "/connect",
+  async (req, res) => {
 
-  if (!sessions[userId]) {
-    await createSession(userId);
-  }
+    const { userId } = req.body;
 
-  res.json({ success: true });
-});
+    if (!userId) {
 
-app.get("/qr/:userId", (req, res) => {
-  const { userId } = req.params;
-  const session = sessions[userId];
-
-  if (!session) {
-    return res.status(404).json({ error: "Session not found" });
-  }
-
-  res.json({
-    qr: session.qr,
-    connected: session.connected,
-  });
-});
-
-app.get("/status/:userId", (req, res) => {
-  const { userId } = req.params;
-  const session = sessions[userId];
-
-  res.json({
-    connected: session?.connected || false,
-    phoneNumber: session?.phoneNumber || null,
-  });
-});
-
-app.post("/send-message", async (req, res) => {
-  try {
-    const { userId, to, text } = req.body;
-    if (!userId || !to || !text) {
-      return res.status(400).json({ error: "Missing fields" });
+      return res.status(400)
+        .json({
+          error:
+            "userId required",
+        });
     }
 
-    const session = sessions[userId];
-    if (!session?.sock) {
-      return res.status(404).json({ error: "Session not found or not connected" });
+    if (!sessions[userId]) {
+
+      await createSession(
+        userId
+      );
     }
 
-    await session.sock.sendMessage(to, { text });
-    res.json({ success: true });
-  } catch (err: any) {
-    console.error("Send message error:", err);
-    res.status(500).json({ error: err.message || "Send failed" });
+    res.json({
+      success: true,
+    });
   }
-});
+);
 
-app.post("/disconnect", async (req, res) => {
-  const { userId } = req.body;
-  const session = sessions[userId];
+// ========================
+// QR
+// ========================
 
-  if (session) {
+app.get(
+  "/qr/:userId",
+  (req, res) => {
+
+    const { userId } =
+      req.params;
+
+    const session =
+      sessions[userId];
+
+    if (!session) {
+
+      return res.status(404)
+        .json({
+          error:
+            "Session not found",
+        });
+    }
+
+    res.json({
+      qr: session.qr,
+      connected:
+        session.connected,
+    });
+  }
+);
+
+// ========================
+// STATUS
+// ========================
+
+app.get(
+  "/status/:userId",
+  (req, res) => {
+
+    const { userId } =
+      req.params;
+
+    const session =
+      sessions[userId];
+
+    res.json({
+      connected:
+        session?.connected ||
+        false,
+      phoneNumber:
+        session?.phoneNumber ||
+        null,
+    });
+  }
+);
+
+// ========================
+// SEND MESSAGE
+// ========================
+
+app.post(
+  "/send-message",
+  async (req, res) => {
+
     try {
-      await session.sock.logout();
-    } catch (e) {
-      console.error("Logout error:", e);
+
+      const {
+        userId,
+        to,
+        text,
+      } = req.body;
+
+      if (
+        !userId ||
+        !to ||
+        !text
+      ) {
+
+        return res.status(400)
+          .json({
+            error:
+              "Missing fields",
+          });
+      }
+
+      const session =
+        sessions[userId];
+
+      if (!session?.sock) {
+
+        return res.status(404)
+          .json({
+            error:
+              "Session not found",
+          });
+      }
+
+      // NORMALIZE NUMBER
+      const jid =
+        to.includes("@s.whatsapp.net")
+          ? to
+          : `${to}@s.whatsapp.net`;
+
+      await session.sock.sendMessage(
+        jid,
+        {
+          text,
+        }
+      );
+
+      res.json({
+        success: true,
+      });
+
+    } catch (err: any) {
+
+      console.error(
+        "❌ Send failed:",
+        err
+      );
+
+      res.status(500).json({
+        error:
+          err.message ||
+          "Send failed",
+      });
     }
-    delete sessions[userId];
   }
+);
 
-  res.json({ success: true });
-});
+// ========================
+// DISCONNECT
+// ========================
 
-app.get("/health", (_, res) => res.json({ status: "ok" }));
+app.post(
+  "/disconnect",
+  async (req, res) => {
 
-app.listen(PORT, () => {
-  console.log(`🚀 WhatsApp Gateway running on port ${PORT}`);
-});
+    const { userId } =
+      req.body;
+
+    const session =
+      sessions[userId];
+
+    if (session) {
+
+      try {
+
+        await session.sock.logout();
+
+      } catch (e) {
+
+        console.error(
+          "Logout error:",
+          e
+        );
+      }
+
+      delete sessions[userId];
+    }
+
+    res.json({
+      success: true,
+    });
+  }
+);
+
+// ========================
+// HEALTH
+// ========================
+
+app.get(
+  "/health",
+  (_, res) => {
+
+    res.json({
+      status: "ok",
+    });
+  }
+);
+
+// ========================
+// START SERVER
+// ========================
+
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+
+    console.log(
+      `🚀 Gateway running on ${PORT}`
+    );
+  }
+);
