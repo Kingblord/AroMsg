@@ -20,7 +20,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3001;
+const PORT = Number(process.env.PORT) || 3001;
 
 const BACKEND_URL =
   process.env.BACKEND_URL;
@@ -487,13 +487,8 @@ app.get(
 // START SERVER
 // ========================
 
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-
-    console.log(
-      `🚀 Gateway running on ${PORT}`
-    );
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Gateway running on ${PORT}`);
+});
   }
 );
