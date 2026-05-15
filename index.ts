@@ -231,25 +231,47 @@ async function createSession(
           // SEND DIRECTLY TO BACKEND
           // ========================
 
-          await axios.post(
-            `${BACKEND_URL}/api/internal/receive-message`,
-            {
-              userId,
-              from,
-              text,
-              platform: "whatsapp",
-              messageId:
-                msg.key.id,
-              timestamp:
-                msg.messageTimestamp,
-            },
-            {
-              headers: {
-                Authorization:
-                  `Bearer ${INTERNAL_API_KEY}`,
+          try {
+            const backendResponse = await axios.post(
+              `${BACKEND_URL}/api/internal/receive-message`,
+              {
+                userId,
+                from,
+                text,
+                platform: "whatsapp",
+                messageId:
+                  msg.key.id,
+                timestamp:
+                  msg.messageTimestamp,
               },
+              {
+                headers: {
+                  Authorization:
+                    `Bearer ${INTERNAL_API_KEY}`,
+                },
+              }
+            );
+
+            // Check if backend returned an AI response to send back
+            if (backendResponse.data?.aiResponse) {
+              const { to, text: responseText } = backendResponse.data.aiResponse;
+              console.log(`📤 Sending AI response to ${to}`);
+              
+              // Normalize the recipient JID
+              const jid = to.includes('@s.whatsapp.net') 
+                ? to 
+                : `${to}@s.whatsapp.net`;
+              
+              // Send the AI-generated response back to the customer
+              await session.sock.sendMessage(jid, {
+                text: responseText,
+              });
+
+              console.log(`✅ AI response sent to ${to}`);
             }
-          );
+          } catch (backendErr) {
+            console.error("❌ Backend error:", backendErr);
+          }
 
         } catch (err) {
 
@@ -490,4 +512,3 @@ app.get(
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Gateway running on ${PORT}`);
 });
-  
