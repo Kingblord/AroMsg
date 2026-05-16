@@ -12,8 +12,64 @@ import makeWASocket, {
 
 import P from "pino";
 import QRCode from "qrcode";
+import admin from "firebase-admin";
 
 dotenv.config();
+
+// ========================
+// FIREBASE ADMIN INIT
+// ========================
+
+if (!admin.apps.length) {
+  const projectId   = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey  = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+
+  if (!projectId || !clientEmail || !privateKey) {
+    console.warn("⚠️  Firebase env vars missing — messages will NOT be persisted to Firestore");
+  } else {
+    admin.initializeApp({
+      credential: admin.credential.cert({ projectId, clientEmail, privateKey } as admin.ServiceAccount),
+      projectId,
+    });
+    console.log("🔥 Firebase Admin initialised");
+  }
+}
+
+const db = admin.apps.length ? admin.firestore() : null;
+
+/** Persist a message to Firestore — fire-and-forget, never throws */
+async function persistMessage(
+  userId: string,
+  contactJid: string,
+  text: string,
+  role: "user" | "assistant",
+  messageId: string,
+  timestamp: number,
+  platform: string = "whatsapp",
+) {
+  if (!db) return;
+  try {
+    await db
+      .collection("businesses")
+      .doc(userId)
+      .collection("whatsapp_messages")
+      .add({
+        contactJid,
+        from:      role === "user" ? contactJid : userId,
+        to:        role === "user" ? userId      : contactJid,
+        text,
+        role,
+        platform,
+        messageId,
+        timestamp,
+        direction: role === "user" ? "incoming" : "outgoing",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+  } catch (err: any) {
+    console.error("❌ Firestore persist error:", err?.message || err);
+  }
+}
 
 const app = express();
 
@@ -249,7 +305,19 @@ async function createSession(
           // the socket to disconnect while waiting for the AI response.
           // ========================
 
+          const bareJid = normalizedFrom.replace("@s.whatsapp.net", "");
+
           const processMessage = async () => {
+            // 1. Persist incoming customer message immediately to Firestore
+            await persistMessage(
+              userId,
+              bareJid,
+              text,
+              "user",
+              msg.key.id || `in_${Date.now()}`,
+              timestamp,
+            );
+
             try {
               const backendResponse = await axios.post(
                 `${BACKEND_URL}/api/internal/receive-message`,
@@ -286,6 +354,17 @@ async function createSession(
                 if (activeSession?.connected && activeSession.sock) {
                   await activeSession.sock.sendMessage(jid, { text: responseText });
                   console.log(`✅ AI response sent to ${jid}`);
+
+                  // 2. Persist the AI reply to Firestore (backend also saves it, but
+                  //    gateway write ensures it lands even if the backend save fails)
+                  await persistMessage(
+                    userId,
+                    bareJid,
+                    responseText,
+                    "assistant",
+                    `ai_gw_${Date.now()}`,
+                    Date.now(),
+                  );
                 } else {
                   console.warn(`⚠️ Session ${userId} not connected — skipping send`);
                 }
