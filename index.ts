@@ -4,7 +4,6 @@ import dotenv from "dotenv";
 import axios from "axios";
 import { mkdirSync } from "fs";
 
-
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
@@ -306,20 +305,10 @@ async function createSession(
           // the socket to disconnect while waiting for the AI response.
           // ========================
 
-          const bareJid = normalizedFrom.replace("@s.whatsapp.net", "");
-
           const processMessage = async () => {
-            // 1. Persist incoming customer message immediately to Firestore
-            await persistMessage(
-              userId,
-              bareJid,
-              text,
-              "user",
-              msg.key.id || `in_${Date.now()}`,
-              timestamp,
-            );
-
             try {
+              // Backend handles all Firestore writes (incoming + AI reply).
+              // Gateway responsibility: deliver the AI reply back via WhatsApp.
               const backendResponse = await axios.post(
                 `${BACKEND_URL}/api/internal/receive-message`,
                 {
@@ -327,7 +316,7 @@ async function createSession(
                   from: normalizedFrom,
                   text,
                   platform: "whatsapp",
-                  messageId: msg.key.id,
+                  messageId: msg.key.id || `in_${Date.now()}`,
                   timestamp,
                 },
                 {
@@ -355,19 +344,8 @@ async function createSession(
                 if (activeSession?.connected && activeSession.sock) {
                   await activeSession.sock.sendMessage(jid, { text: responseText });
                   console.log(`✅ AI response sent to ${jid}`);
-
-                  // 2. Persist the AI reply to Firestore (backend also saves it, but
-                  //    gateway write ensures it lands even if the backend save fails)
-                  await persistMessage(
-                    userId,
-                    bareJid,
-                    responseText,
-                    "assistant",
-                    `ai_gw_${Date.now()}`,
-                    Date.now(),
-                  );
                 } else {
-                  console.warn(`⚠️ Session ${userId} not connected — skipping send`);
+                  console.warn(`⚠️ Session ${userId} not connected — could not deliver reply to ${jid}`);
                 }
               }
             } catch (backendErr: any) {
