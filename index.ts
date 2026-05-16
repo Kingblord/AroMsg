@@ -223,8 +223,16 @@ async function createSession(
             return;
           }
 
+          // Normalise JID — convert @lid (Linked Device ID) to @s.whatsapp.net
+          // Baileys cannot send to @lid JIDs, only to @s.whatsapp.net
+          const normalizedFrom = from.endsWith('@s.whatsapp.net')
+            ? from
+            : from.endsWith('@lid')
+              ? `${from.replace('@lid', '')}@s.whatsapp.net`
+              : `${from}@s.whatsapp.net`;
+
           console.log(
-            `📨 ${from}: ${text}`
+            `📨 ${normalizedFrom}: ${text}`
           );
 
           // Convert protobuf Long timestamp to plain number
@@ -236,49 +244,59 @@ async function createSession(
 
           // ========================
           // SEND DIRECTLY TO BACKEND
+          // Fire-and-forget: do NOT await inside the event handler.
+          // Awaiting here blocks Baileys' internal event loop and causes
+          // the socket to disconnect while waiting for the AI response.
           // ========================
 
-          try {
-            const backendResponse = await axios.post(
-              `${BACKEND_URL}/api/internal/receive-message`,
-              {
-                userId,
-                from,
-                text,
-                platform: "whatsapp",
-                messageId: msg.key.id,
-                timestamp,
-              },
-              {
-                headers: {
-                  Authorization:
-                    `Bearer ${INTERNAL_API_KEY}`,
+          const processMessage = async () => {
+            try {
+              const backendResponse = await axios.post(
+                `${BACKEND_URL}/api/internal/receive-message`,
+                {
+                  userId,
+                  from: normalizedFrom,
+                  text,
+                  platform: "whatsapp",
+                  messageId: msg.key.id,
+                  timestamp,
                 },
+                {
+                  headers: {
+                    Authorization: `Bearer ${INTERNAL_API_KEY}`,
+                  },
+                  timeout: 55000, // 55s — just under Vercel's 60s limit
+                }
+              );
+
+              if (backendResponse.data?.aiResponse) {
+                const { to, text: responseText } = backendResponse.data.aiResponse;
+
+                // Ensure we always send to @s.whatsapp.net
+                const jid = to.endsWith('@s.whatsapp.net')
+                  ? to
+                  : to.endsWith('@lid')
+                    ? `${to.replace('@lid', '')}@s.whatsapp.net`
+                    : `${to}@s.whatsapp.net`;
+
+                console.log(`📤 Sending AI response to ${jid}`);
+
+                // Safe session reference — socket may have reconnected during AI generation
+                const activeSession = sessions[userId];
+                if (activeSession?.connected && activeSession.sock) {
+                  await activeSession.sock.sendMessage(jid, { text: responseText });
+                  console.log(`✅ AI response sent to ${jid}`);
+                } else {
+                  console.warn(`⚠️ Session ${userId} not connected — skipping send`);
+                }
               }
-            );
-
-            // Check if backend returned an AI response to send back
-            if (backendResponse.data?.aiResponse) {
-              const { to, text: responseText } = backendResponse.data.aiResponse;
-              console.log(`📤 Sending AI response to ${to}`);
-
-              // Normalize the recipient JID
-              const jid = to.includes('@s.whatsapp.net')
-                ? to
-                : `${to}@s.whatsapp.net`;
-
-              // Safe session reference — socket may have reconnected
-              const activeSession = sessions[userId];
-              if (activeSession?.connected && activeSession.sock) {
-                await activeSession.sock.sendMessage(jid, { text: responseText });
-                console.log(`✅ AI response sent to ${to}`);
-              } else {
-                console.warn(`⚠️ Session ${userId} not connected — skipping send`);
-              }
+            } catch (backendErr: any) {
+              console.error("❌ Backend error:", backendErr?.message || backendErr);
             }
-          } catch (backendErr) {
-            console.error("❌ Backend error:", backendErr);
-          }
+          };
+
+          // Kick off async — return immediately so Baileys event loop stays alive
+          setImmediate(() => { processMessage(); });
 
         } catch (err) {
 
