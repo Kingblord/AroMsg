@@ -375,44 +375,40 @@ async function createSession(
           // ========================
           // WEBHOOK TO BACKEND
           // ========================
-setImmediate(async () => {
+setImmediate(() => {
 
-  try {
+  axios.post(
 
-    const response =
-      await axios.post(
+    `${BACKEND_URL}/webhook`,
 
-        `${BACKEND_URL}/webhook`,
+    {
+      userId,
+      from: normalizedFrom,
+      text,
+      platform: "whatsapp",
+      messageId,
+      timestamp,
+    },
 
-        {
-          userId,
-          from: normalizedFrom,
-          text,
-          platform: "whatsapp",
-          messageId,
-          timestamp,
-        },
+    {
+      headers: {
+        Authorization:
+          `Bearer ${INTERNAL_API_KEY}`
+      },
 
-        {
-          headers: {
-            Authorization:
-              `Bearer ${INTERNAL_API_KEY}`
-          },
+      timeout: 15000,
+    }
 
-          timeout: 15000,
-        }
-      );
+  )
+
+  .then(async (response) => {
 
     console.log(
       "✅ Backend webhook delivered"
     );
 
-    // ========================
-    // AI RESPONSE
-    // ========================
-
     const aiReply =
-      response?.data?.aiReply;
+      response.data?.aiReply;
 
     if (
       aiReply &&
@@ -423,21 +419,23 @@ setImmediate(async () => {
         `🤖 AI Reply: ${aiReply}`
       );
 
-      // Send AI reply back to user
-
-      await sock.sendMessage(
-        normalizedFrom,
-        {
-          text: aiReply
-        }
-      );
+      await sessions[userId]
+        .sock
+        .sendMessage(
+          normalizedFrom,
+          {
+            text: aiReply
+          }
+        );
 
       console.log(
         `📤 Reply sent to ${normalizedFrom}`
       );
     }
 
-  } catch (err: any) {
+  })
+
+  .catch((err: any) => {
 
     console.error(
       "❌ Backend webhook failed:",
@@ -445,8 +443,29 @@ setImmediate(async () => {
       err?.message ||
       err
     );
-  }
+
+  });
+
 });
+      
+        } catch (err) {      
+      
+          console.error(      
+            "❌ Message error:",      
+            err      
+          );      
+        }      
+      }      
+    );      
+      
+  } catch (err) {      
+      
+    console.error(      
+      `❌ Session failed: ${userId}`,      
+      err      
+    );      
+  }      
+}      
 
     // ========================
     // READ AI RESPONSE
