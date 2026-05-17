@@ -26,7 +26,7 @@ if (!admin.apps.length) {
   const privateKey  = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
 
   if (!projectId || !clientEmail || !privateKey) {
-    console.warn("⚠️  Firebase env vars missing — messages will NOT be persisted to Firestore");
+    console.warn("⚠️  Firebase env vars missing");
   } else {
     admin.initializeApp({
       credential: admin.credential.cert({ projectId, clientEmail, privateKey } as admin.ServiceAccount),
@@ -36,70 +36,31 @@ if (!admin.apps.length) {
   }
 }
 
-const db = admin.apps.length ? admin.firestore() : null;
+// ========================
+// UTILITIES
+// ========================
 
-// Track active Firestore snapshot unsubscribe functions per userId
-const snapshotUnsubs: Record<string, () => void> = {};
-
-/**
- * Subscribe to unsent AI reply docs for this user.
- * When the backend writes a doc with { role:'assistant', sent:false },
- * this fires, delivers the message via WhatsApp, then marks it sent:true.
- */
-function subscribeToAiReplies(userId: string) {
-  if (!db) return;
-
-  // Unsubscribe any existing listener first
-  if (snapshotUnsubs[userId]) {
-    snapshotUnsubs[userId]();
-    delete snapshotUnsubs[userId];
+/** Normalize JID to always be @s.whatsapp.net format */
+function normalizeJid(jid: string): string {
+  if (!jid) return jid;
+  
+  // Already valid
+  if (jid.endsWith("@s.whatsapp.net")) {
+    return jid;
   }
-
-  const query = db
-    .collection('businesses')
-    .doc(userId)
-    .collection('whatsapp_messages')
-    .where('role', '==', 'assistant')
-    .where('sent', '==', false);
-
-  const unsub = query.onSnapshot(async (snap) => {
-    for (const docSnap of snap.docs) {
-      const data = docSnap.data();
-      const contactJid: string = data.contactJid || data.to || '';
-      const text: string       = data.text || '';
-
-      if (!contactJid || !text) continue;
-
-      // Build the full JID to send to
-      const jid = contactJid.endsWith('@s.whatsapp.net')
-        ? contactJid
-        : `${contactJid}@s.whatsapp.net`;
-
-      const activeSession = sessions[userId];
-      if (!activeSession?.connected || !activeSession.sock) {
-        console.warn(`[snapshot] Session ${userId} not connected — will retry on next snapshot`);
-        continue;
-      }
-
-      try {
-        await activeSession.sock.sendMessage(jid, { text });
-        console.log(`[snapshot] Delivered AI reply to ${jid}`);
-
-        // Mark sent:true so this snapshot never fires again for this doc
-        await docSnap.ref.update({ sent: true });
-      } catch (err: any) {
-        console.error(`[snapshot] Failed to deliver to ${jid}:`, err?.message || err);
-      }
-    }
-  }, (err) => {
-    console.error(`[snapshot] Listener error for ${userId}:`, err?.message || err);
-  });
-
-  snapshotUnsubs[userId] = unsub;
-  console.log(`[snapshot] Listening for AI replies for ${userId}`);
+  
+  // LID → WhatsApp JID
+  if (jid.endsWith("@lid")) {
+    return `${jid.replace("@lid", "")}@s.whatsapp.net`;
+  }
+  
+  // Raw number
+  if (!jid.includes("@")) {
+    return `${jid}@s.whatsapp.net`;
+  }
+  
+  return jid;
 }
-
-
 
 const app = express();
 
@@ -138,6 +99,23 @@ interface SessionData {
 
 const sessions:
   Record<string, SessionData> = {};
+
+// ========================
+// MESSAGE DEDUPLICATION
+// ========================
+
+const processedMessages = new Set<string>();
+
+function markProcessed(msgId: string) {
+  processedMessages.add(msgId);
+  setTimeout(() => {
+    processedMessages.delete(msgId);
+  }, 1000 * 60); // 60 second window
+}
+
+function isProcessed(msgId: string): boolean {
+  return processedMessages.has(msgId);
+}
 
 // ========================
 // CREATE SESSION
@@ -228,9 +206,6 @@ async function createSession(
           console.log(
             `✅ Connected: ${userId}`
           );
-
-          // Start Firestore snapshot listener to deliver AI replies
-          subscribeToAiReplies(userId);
         }
 
         // DISCONNECTED
@@ -249,29 +224,41 @@ async function createSession(
           );
 
           if (!shouldReconnect) {
-            // Logged out — stop snapshot listener
-            if (snapshotUnsubs[userId]) {
-              snapshotUnsubs[userId]();
-              delete snapshotUnsubs[userId];
-            }
-          }
-
-          if (
-            shouldReconnect &&
-            !sessions[userId]
-              ?.reconnecting
+            // Logged out — delete session
+            delete sessions[userId];
+          } else if (
+            !sessions[userId]?.reconnecting
           ) {
+            // Need to reconnect with proper cleanup
 
-            sessions[userId]
-              .reconnecting = true;
+            sessions[userId].reconnecting = true;
 
             console.log(
               `🔄 Reconnecting ${userId}`
             );
 
-            setTimeout(() => {
-              createSession(userId);
-            }, 3000);
+            // CLEAN OLD SOCKET
+            try {
+              await sock.ws?.close?.();
+            } catch {}
+
+            try {
+              sock.end?.();
+            } catch {}
+
+            // REMOVE OLD SESSION
+            delete sessions[userId];
+
+            setTimeout(async () => {
+              try {
+                await createSession(userId);
+              } catch (err) {
+                console.error(
+                  `Reconnect failed ${userId}`,
+                  err
+                );
+              }
+            }, 5000);
           }
         }
       }
@@ -291,20 +278,31 @@ async function createSession(
 
           if (!msg?.message) return;
 
-          // IGNORE OWN MESSAGES
+          // FILTER: own messages
           if (msg.key.fromMe) return;
+
+          // FILTER: broadcast messages
+          if (msg.broadcast) return;
+
+          // FILTER: protocol/stub messages
+          if (msg.messageStubType) return;
+
+          // FILTER: status broadcasts
+          if (msg.key.remoteJid === "status@broadcast") return;
+
+          // FILTER: groups
+          if (msg.key.remoteJid?.endsWith("@g.us")) return;
+
+          // CHECK FOR DUPLICATES
+          if (isProcessed(msg.key.id)) {
+            console.log(`[dedup] Skipping duplicate: ${msg.key.id}`);
+            return;
+          }
 
           const from =
             msg.key.remoteJid;
 
           if (!from) return;
-
-          // IGNORE GROUPS
-          if (
-            from.endsWith("@g.us")
-          ) {
-            return;
-          }
 
           const text =
             msg.message.conversation ||
@@ -320,13 +318,11 @@ async function createSession(
             return;
           }
 
-          // Normalise JID — convert @lid (Linked Device ID) to @s.whatsapp.net
-          // Baileys cannot send to @lid JIDs, only to @s.whatsapp.net
-          const normalizedFrom = from.endsWith('@s.whatsapp.net')
-            ? from
-            : from.endsWith('@lid')
-              ? `${from.replace('@lid', '')}@s.whatsapp.net`
-              : `${from}@s.whatsapp.net`;
+          // Mark as processed
+          markProcessed(msg.key.id);
+
+          // Normalize JID
+          const normalizedFrom = normalizeJid(from);
 
           console.log(
             `📨 ${normalizedFrom}: ${text}`
@@ -340,16 +336,11 @@ async function createSession(
               : Number(rawTs) * 1000;
 
           // ========================
-          // SEND DIRECTLY TO BACKEND
-          // Fire-and-forget: do NOT await inside the event handler.
-          // Awaiting here blocks Baileys' internal event loop and causes
-          // the socket to disconnect while waiting for the AI response.
+          // NOTIFY BACKEND
           // ========================
+          // Fire-and-forget — backend saves incoming message and runs AI.
+          // Backend then calls gateway /send-message to deliver the reply.
 
-          // Fire-and-forget — the backend saves the incoming message, runs AI,
-          // and writes the reply with sent:false. The Firestore snapshot listener
-          // (subscribeToAiReplies) picks it up and delivers it via sock.sendMessage.
-          // We do NOT await or handle the response here.
           setImmediate(() => {
             axios.post(
               `${BACKEND_URL}/api/internal/receive-message`,
@@ -518,11 +509,8 @@ app.post(
           });
       }
 
-      // NORMALIZE NUMBER
-      const jid =
-        to.includes("@s.whatsapp.net")
-          ? to
-          : `${to}@s.whatsapp.net`;
+      // NORMALIZE JID
+      const jid = normalizeJid(to);
 
       await session.sock.sendMessage(
         jid,
@@ -601,6 +589,25 @@ app.get(
     });
   }
 );
+
+// ========================
+// GRACEFUL SHUTDOWN
+// ========================
+
+process.on("SIGTERM", async () => {
+  console.log("SIGTERM received — shutting down gracefully");
+
+  for (const userId in sessions) {
+    try {
+      await sessions[userId].sock?.logout();
+      console.log(`✅ Logged out ${userId}`);
+    } catch (err) {
+      console.error(`❌ Logout error for ${userId}:`, err);
+    }
+  }
+
+  process.exit(0);
+});
 
 // ========================
 // START SERVER
