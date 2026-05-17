@@ -1,42 +1,133 @@
 const express = require("express");
+const dotenv = require("dotenv");
+
+dotenv.config();
 
 const app = express();
 
 app.use(express.json());
 
-app.post("/webhook", async (req, res) => {
+const INTERNAL_API_KEY =
+  process.env.INTERNAL_API_KEY;
 
-  console.log("📨 WEBHOOK RECEIVED:");
-  console.log(JSON.stringify(req.body, null, 2));
+// ========================
+// WEBHOOK
+// ========================
 
-  const {
-    userId,
-    from,
-    text
-  } = req.body;
+app.post(
+  "/webhook",
+  async (req, res) => {
 
-  // Fake AI reply
+    try {
 
-  const aiReply =
-    `Echo: ${text}`;
+      // ========================
+      // AUTH CHECK
+      // ========================
 
-  console.log(
-    "🤖 AI RESPONSE:",
-    aiReply
-  );
+      const authHeader =
+        req.headers.authorization;
 
-  res.json({
-    success: true,
-    aiReply
-  });
-});
+      if (
+        !authHeader ||
+        authHeader !==
+          `Bearer ${INTERNAL_API_KEY}`
+      ) {
 
-app.get("/", (_, res) => {
-  res.send("Webhook online");
-});
+        console.log(
+          "❌ Unauthorized request"
+        );
 
-app.listen(3000, () => {
-  console.log(
-    "🚀 Test webhook running"
-  );
-});
+        return res.status(401)
+          .json({
+            success: false,
+            error: "Unauthorized"
+          });
+      }
+
+      console.log(
+        "📨 WEBHOOK RECEIVED:"
+      );
+
+      console.log(
+        JSON.stringify(
+          req.body,
+          null,
+          2
+        )
+      );
+
+      const {
+        userId,
+        from,
+        text,
+        platform,
+        messageId,
+        timestamp
+      } = req.body;
+
+      // ========================
+      // FAKE AI
+      // ========================
+
+      const aiReply =
+        `Echo: ${text}`;
+
+      console.log(
+        "🤖 AI RESPONSE:",
+        aiReply
+      );
+
+      // ========================
+      // SUCCESS
+      // ========================
+
+      res.json({
+        success: true,
+        aiReply
+      });
+
+    } catch (err) {
+
+      console.error(
+        "❌ Webhook error:",
+        err
+      );
+
+      res.status(500).json({
+        success: false,
+        error: "Server error"
+      });
+    }
+  }
+);
+
+// ========================
+// HEALTH
+// ========================
+
+app.get(
+  "/",
+  (_, res) => {
+
+    res.send(
+      "Webhook online"
+    );
+  }
+);
+
+// ========================
+// START
+// ========================
+
+const PORT =
+  Number(process.env.PORT) || 3000;
+
+app.listen(
+  PORT,
+  () => {
+
+    console.log(
+      `🚀 Test webhook running on ${PORT}`
+    );
+  }
+);
