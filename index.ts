@@ -380,7 +380,7 @@ async function createSession(
 
             axios.post(
 
-              `${BACKEND_URL}/api/whatsapp/webhook`,
+              `${BACKEND_URL}/webhook`,
 
               {
                 userId,
