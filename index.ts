@@ -376,62 +376,76 @@ async function createSession(
           // WEBHOOK TO BACKEND
           // ========================
 
-          setImmediate(() => {
+          setImmediate(async () => {
 
-            axios.post(
+  try {
 
-              `${BACKEND_URL}/webhook`,
+    const response =
+      await axios.post(
 
-              {
-                userId,
-                from:
-                  normalizedFrom,
-                text,
-                platform:
-                  "whatsapp",
-                messageId,
-                timestamp,
-              },
+        `${BACKEND_URL}/webhook`,
 
-              {
-                headers: {
-                  Authorization:
-                    `Bearer ${INTERNAL_API_KEY}`
-                },
+        {
+          userId,
+          from: normalizedFrom,
+          text,
+          platform: "whatsapp",
+          messageId,
+          timestamp,
+        },
 
-                timeout: 15000,
-              }
+        {
+          headers: {
+            Authorization:
+              `Bearer ${INTERNAL_API_KEY}`
+          },
 
-            ).catch(
-              (err: any) => {
-
-                console.error(
-                  "❌ Backend webhook failed:",
-                  err?.message || err
-                );
-              }
-            );
-
-          });
-
-        } catch (err) {
-
-          console.error(
-            "❌ Message error:",
-            err
-          );
+          timeout: 30000,
         }
-      }
+      );
+
+    console.log(
+      "✅ Backend notified"
     );
 
-  } catch (err) {
+    // ========================
+    // READ AI RESPONSE
+    // ========================
+
+    const aiReply =
+      response?.data?.aiReply;
+
+    if (
+      aiReply &&
+      typeof aiReply === "string"
+    ) {
+
+      console.log(
+        `🤖 Sending AI reply: ${aiReply}`
+      );
+
+      await sock.sendMessage(
+        normalizedFrom,
+        {
+          text: aiReply
+        }
+      );
+
+      console.log(
+        "📤 AI reply sent"
+      );
+    }
+
+  } catch (err: any) {
 
     console.error(
-      `❌ Session failed: ${userId}`,
+      "❌ Backend webhook failed:",
+      err?.response?.data ||
+      err?.message ||
       err
     );
   }
-}
+});
 
 // ========================
 // CONNECT
