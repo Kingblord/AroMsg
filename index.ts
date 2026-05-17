@@ -38,38 +38,68 @@ if (!admin.apps.length) {
 
 const db = admin.apps.length ? admin.firestore() : null;
 
-/** Persist a message to Firestore — fire-and-forget, never throws */
-async function persistMessage(
-  userId: string,
-  contactJid: string,
-  text: string,
-  role: "user" | "assistant",
-  messageId: string,
-  timestamp: number,
-  platform: string = "whatsapp",
-) {
+// Track active Firestore snapshot unsubscribe functions per userId
+const snapshotUnsubs: Record<string, () => void> = {};
+
+/**
+ * Subscribe to unsent AI reply docs for this user.
+ * When the backend writes a doc with { role:'assistant', sent:false },
+ * this fires, delivers the message via WhatsApp, then marks it sent:true.
+ */
+function subscribeToAiReplies(userId: string) {
   if (!db) return;
-  try {
-    await db
-      .collection("businesses")
-      .doc(userId)
-      .collection("whatsapp_messages")
-      .add({
-        contactJid,
-        from:      role === "user" ? contactJid : userId,
-        to:        role === "user" ? userId      : contactJid,
-        text,
-        role,
-        platform,
-        messageId,
-        timestamp,
-        direction: role === "user" ? "incoming" : "outgoing",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-  } catch (err: any) {
-    console.error("❌ Firestore persist error:", err?.message || err);
+
+  // Unsubscribe any existing listener first
+  if (snapshotUnsubs[userId]) {
+    snapshotUnsubs[userId]();
+    delete snapshotUnsubs[userId];
   }
+
+  const query = db
+    .collection('businesses')
+    .doc(userId)
+    .collection('whatsapp_messages')
+    .where('role', '==', 'assistant')
+    .where('sent', '==', false);
+
+  const unsub = query.onSnapshot(async (snap) => {
+    for (const docSnap of snap.docs) {
+      const data = docSnap.data();
+      const contactJid: string = data.contactJid || data.to || '';
+      const text: string       = data.text || '';
+
+      if (!contactJid || !text) continue;
+
+      // Build the full JID to send to
+      const jid = contactJid.endsWith('@s.whatsapp.net')
+        ? contactJid
+        : `${contactJid}@s.whatsapp.net`;
+
+      const activeSession = sessions[userId];
+      if (!activeSession?.connected || !activeSession.sock) {
+        console.warn(`[snapshot] Session ${userId} not connected — will retry on next snapshot`);
+        continue;
+      }
+
+      try {
+        await activeSession.sock.sendMessage(jid, { text });
+        console.log(`[snapshot] Delivered AI reply to ${jid}`);
+
+        // Mark sent:true so this snapshot never fires again for this doc
+        await docSnap.ref.update({ sent: true });
+      } catch (err: any) {
+        console.error(`[snapshot] Failed to deliver to ${jid}:`, err?.message || err);
+      }
+    }
+  }, (err) => {
+    console.error(`[snapshot] Listener error for ${userId}:`, err?.message || err);
+  });
+
+  snapshotUnsubs[userId] = unsub;
+  console.log(`[snapshot] Listening for AI replies for ${userId}`);
 }
+
+
 
 const app = express();
 
@@ -198,6 +228,9 @@ async function createSession(
           console.log(
             `✅ Connected: ${userId}`
           );
+
+          // Start Firestore snapshot listener to deliver AI replies
+          subscribeToAiReplies(userId);
         }
 
         // DISCONNECTED
@@ -214,6 +247,14 @@ async function createSession(
           console.log(
             `❌ Disconnected: ${userId}`
           );
+
+          if (!shouldReconnect) {
+            // Logged out — stop snapshot listener
+            if (snapshotUnsubs[userId]) {
+              snapshotUnsubs[userId]();
+              delete snapshotUnsubs[userId];
+            }
+          }
 
           if (
             shouldReconnect &&
@@ -305,56 +346,29 @@ async function createSession(
           // the socket to disconnect while waiting for the AI response.
           // ========================
 
-          const processMessage = async () => {
-            try {
-              // Backend handles all Firestore writes (incoming + AI reply).
-              // Gateway responsibility: deliver the AI reply back via WhatsApp.
-              const backendResponse = await axios.post(
-                `${BACKEND_URL}/api/internal/receive-message`,
-                {
-                  userId,
-                  from: normalizedFrom,
-                  text,
-                  platform: "whatsapp",
-                  messageId: msg.key.id || `in_${Date.now()}`,
-                  timestamp,
-                },
-                {
-                  headers: {
-                    Authorization: `Bearer ${INTERNAL_API_KEY}`,
-                  },
-                  timeout: 55000, // 55s — just under Vercel's 60s limit
-                }
-              );
-
-              if (backendResponse.data?.aiResponse) {
-                const { to, text: responseText } = backendResponse.data.aiResponse;
-
-                // Ensure we always send to @s.whatsapp.net
-                const jid = to.endsWith('@s.whatsapp.net')
-                  ? to
-                  : to.endsWith('@lid')
-                    ? `${to.replace('@lid', '')}@s.whatsapp.net`
-                    : `${to}@s.whatsapp.net`;
-
-                console.log(`📤 Sending AI response to ${jid}`);
-
-                // Safe session reference — socket may have reconnected during AI generation
-                const activeSession = sessions[userId];
-                if (activeSession?.connected && activeSession.sock) {
-                  await activeSession.sock.sendMessage(jid, { text: responseText });
-                  console.log(`✅ AI response sent to ${jid}`);
-                } else {
-                  console.warn(`⚠️ Session ${userId} not connected — could not deliver reply to ${jid}`);
-                }
+          // Fire-and-forget — the backend saves the incoming message, runs AI,
+          // and writes the reply with sent:false. The Firestore snapshot listener
+          // (subscribeToAiReplies) picks it up and delivers it via sock.sendMessage.
+          // We do NOT await or handle the response here.
+          setImmediate(() => {
+            axios.post(
+              `${BACKEND_URL}/api/internal/receive-message`,
+              {
+                userId,
+                from:      normalizedFrom,
+                text,
+                platform:  "whatsapp",
+                messageId: msg.key.id || `in_${Date.now()}`,
+                timestamp,
+              },
+              {
+                headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
+                timeout: 60000,
               }
-            } catch (backendErr: any) {
-              console.error("❌ Backend error:", backendErr?.message || backendErr);
-            }
-          };
-
-          // Kick off async — return immediately so Baileys event loop stays alive
-          setImmediate(() => { processMessage(); });
+            ).catch((err: any) => {
+              console.error("❌ Backend notify failed:", err?.message || err);
+            });
+          });
 
         } catch (err) {
 
