@@ -375,8 +375,7 @@ async function createSession(
           // ========================
           // WEBHOOK TO BACKEND
           // ========================
-
-          setImmediate(async () => {
+setImmediate(async () => {
 
   try {
 
@@ -400,16 +399,16 @@ async function createSession(
               `Bearer ${INTERNAL_API_KEY}`
           },
 
-          timeout: 30000,
+          timeout: 15000,
         }
       );
 
     console.log(
-      "✅ Backend notified"
+      "✅ Backend webhook delivered"
     );
 
     // ========================
-    // READ AI RESPONSE
+    // AI RESPONSE
     // ========================
 
     const aiReply =
@@ -421,8 +420,10 @@ async function createSession(
     ) {
 
       console.log(
-        `🤖 Sending AI reply: ${aiReply}`
+        `🤖 AI Reply: ${aiReply}`
       );
+
+      // Send AI reply back to user
 
       await sock.sendMessage(
         normalizedFrom,
@@ -432,7 +433,7 @@ async function createSession(
       );
 
       console.log(
-        "📤 AI reply sent"
+        `📤 Reply sent to ${normalizedFrom}`
       );
     }
 
@@ -446,6 +447,19 @@ async function createSession(
     );
   }
 });
+
+    // ========================
+    // READ AI RESPONSE
+    // ========================
+
+    const aiReply =
+      response?.data?.aiReply;
+
+    if (
+      aiReply &&
+      typeof aiReply === "string"
+    ) {
+
 
 // ========================
 // CONNECT
