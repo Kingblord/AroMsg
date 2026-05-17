@@ -243,7 +243,7 @@ async function createSession(
             } catch {}
 
             try {
-              sock.end?.();
+              sock.ws.close();
             } catch {}
 
             // REMOVE OLD SESSION
@@ -294,7 +294,7 @@ async function createSession(
           if (msg.key.remoteJid?.endsWith("@g.us")) return;
 
           // CHECK FOR DUPLICATES
-          if (isProcessed(msg.key.id)) {
+          if (isProcessed(msg.key.id || "")) {
             console.log(`[dedup] Skipping duplicate: ${msg.key.id}`);
             return;
           }
@@ -319,10 +319,10 @@ async function createSession(
           }
 
           // Mark as processed
-          markProcessed(msg.key.id);
+          markProcessed(msg.key.id || "");
 
           // Normalize JID
-          const normalizedFrom = normalizeJid(from);
+          const normalizedFrom = normalizeJid(from || "");
 
           console.log(
             `📨 ${normalizedFrom}: ${text}`
