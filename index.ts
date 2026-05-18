@@ -380,7 +380,7 @@ async function createSession(
 
             axios.post(
 
-              `${BACKEND_URL}/webhook`,
+              `${BACKEND_URL}/`,
 
               {
                 userId,
@@ -433,10 +433,6 @@ async function createSession(
   }
 }
 
-app.post("/webhook", (req, res) => {
-  console.log("WEBHOOK HIT");
-  res.json({ ok: true });
-});
 
 // ========================
 // CONNECT
