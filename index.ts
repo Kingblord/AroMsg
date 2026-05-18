@@ -5,15 +5,18 @@ import axios from "axios";
 import path from "path";
 import { mkdirSync } from "fs";
 
-
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  Browsers,
+  makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
 
+import { Boom } from "@hapi/boom";
 import P from "pino";
 import QRCode from "qrcode";
+import NodeCache from "@cacheable/node-cache";
 
 dotenv.config();
 
@@ -31,7 +34,7 @@ if (!BACKEND_URL || !INTERNAL_API_KEY) {
 }
 
 // ========================
-// SESSION STORAGE
+// CONFIG & SESSION STORAGE
 // ========================
 
 const SESSIONS_DIR = path.join(process.cwd(), "sessions");
@@ -46,61 +49,65 @@ interface SessionData {
 }
 
 const sessions: Record<string, SessionData> = {};
+const msgRetryCounterCache = new NodeCache({ stdTTL: 60 * 60 * 24 }); // 24h
 const processedMessages = new Set<string>();
 
+// Rate limiting per user to prevent spam (AI responses)
+const responseCooldown = new Map<string, number>(); // JID -> last response timestamp
+const COOLDOWN_MS = 3000; // Minimum 3 seconds between auto-replies
+
 // ========================
-// HELPERS - IMPROVED JID HANDLING
+// HELPERS
 // ========================
 
 function normalizeJid(jid: string): string {
   if (!jid) return jid;
-
-  let clean = jid.trim();
-
-  // Remove any existing @ suffix
-  clean = clean.split('@')[0];
-
-  // Handle LID format
-  if (jid.endsWith("@lid")) {
-    clean = jid.replace("@lid", "");
-  }
-
+  let clean = jid.trim().split("@")[0].split(":")[0];
+  if (jid.endsWith("@lid")) clean = clean.replace("@lid", "");
   return `${clean}@s.whatsapp.net`;
 }
 
 function getPhoneNumber(jid: string): string {
   if (!jid) return "";
-  return jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+  return jid.split("@")[0].split(":")[0].replace(/\D/g, "");
+}
+
+function isPersonalChat(jid: string): boolean {
+  return jid.endsWith("@s.whatsapp.net") && !jid.includes("-");
 }
 
 // ========================
-// CLEAN SEND MESSAGE
+// SEND MESSAGE (Improved)
 // ========================
 
-async function sendMessage(session: any, jid: string, text: string, source: string = "Unknown") {
+async function sendMessage(
+  session: any,
+  jid: string,
+  text: string,
+  source: string = "Unknown"
+) {
   const timestamp = new Date().toISOString();
   const phone = getPhoneNumber(jid);
 
-  console.log(`🔄 [${timestamp}] ${source} → START sending to \( {phone} ( \){jid})`);
-  console.log(`📝 [${timestamp}] Message: \( {text.substring(0, 100)} \){text.length > 100 ? '...' : ''}`);
+  console.log(`🔄 [${timestamp}] ${source} → Sending to ${phone}`);
 
   try {
-    const result = await session.sock.sendMessage(jid, { text }, {
-      linkPreview: false,
-    });
+    const result = await session.sock.sendMessage(
+      jid,
+      { text },
+      { linkPreview: false }
+    );
 
-    console.log(`✅ [${timestamp}] ${source} → MESSAGE SENT SUCCESSFULLY to ${phone}`);
-    console.log(`📨 [${timestamp}] Message ID: ${result?.key?.id || 'N/A'}`);
+    console.log(`✅ [${timestamp}] ${source} → Sent to ${phone}`);
     return result;
   } catch (err: any) {
-    console.error(`❌ [${timestamp}] ${source} → SEND FAILED to ${phone}`);
-    console.error(`Error:`, err.message || err);
+    console.error(`❌ [${timestamp}] ${source} → Failed to ${phone}:`, err.message || err);
     throw err;
   }
 }
 
 // ========================
-// CREATE SESSION (UNTOUCHED LOGIC)
+// CREATE SESSION (Best Practices)
 // ========================
 
 async function createSession(userId: string) {
@@ -110,98 +117,141 @@ async function createSession(userId: string) {
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
-      auth: state,
       version,
-      logger: P({ level: "silent" }),
+      logger: P({ level: "silent" }), // Change to "trace" for debugging
       printQRInTerminal: false,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" })),
+      },
+      browser: Browsers.ubuntu("Sales Bot"),
+      markOnlineOnConnect: false, // Less detectable
+      msgRetryCounterCache,
+      generateHighQualityLinkPreview: true,
       connectTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
       retryRequestDelayMs: 5000,
-      defaultQueryTimeoutMs: undefined,
     });
 
     sessions[userId] = { sock, connected: false, reconnecting: false };
 
+    // Save credentials
     sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on("connection.update", async (update) => {
-      const { connection, qr, lastDisconnect } = update;
+    // Use process() for efficient batch handling (recommended)
+    sock.ev.process(async (events) => {
+      // Connection updates
+      if (events["connection.update"]) {
+        const update = events["connection.update"];
+        const { connection, qr, lastDisconnect } = update;
 
-      if (qr) {
-        sessions[userId].qr = await QRCode.toDataURL(qr);
-        console.log(`📱 QR Generated: ${userId}`);
-      }
-
-      if (connection === "open") {
-        sessions[userId].connected = true;
-        sessions[userId].reconnecting = false;
-        sessions[userId].phoneNumber = sock.user?.id?.split(":")[0] || "";
-        console.log(`✅ Connected: ${userId}`);
-      }
-
-      if (connection === "close") {
-        sessions[userId].connected = false;
-        console.log(`❌ Disconnected: ${userId}`);
-
-        const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
-        if (shouldReconnect && !sessions[userId]?.reconnecting) {
-          sessions[userId].reconnecting = true;
-          delete sessions[userId];
-          setTimeout(() => createSession(userId), 8000);
-        }
-      }
-    });
-
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-      try {
-        const msg = messages[0];
-        if (!msg?.message || msg.key.fromMe || msg.broadcast || msg.messageStubType) return;
-
-        const from = msg.key.remoteJid;
-        if (!from || from === "status@broadcast" || from.endsWith("@g.us")) return;
-
-        const text = msg.message.conversation || 
-                    msg.message.extendedTextMessage?.text ||
-                    msg.message.imageMessage?.caption ||
-                    msg.message.videoMessage?.caption;
-
-        if (!text?.trim()) return;
-
-        const messageId = msg.key.id || "";
-        if (processedMessages.has(messageId)) return;
-        processedMessages.add(messageId);
-        setTimeout(() => processedMessages.delete(messageId), 60000);
-
-        // Dynamic Real Sender Extraction
-        let dynamicTargetJid = from;
-        if (msg.key.participant) {
-          dynamicTargetJid = msg.key.participant;
+        if (qr) {
+          try {
+            sessions[userId].qr = await QRCode.toDataURL(qr);
+            console.log(`📱 QR Generated for ${userId}`);
+          } catch (e) {
+            console.error("QR generation failed", e);
+          }
         }
 
-        let rawNumber = dynamicTargetJid.split("@")[0].split(":")[0];
-        const normalizedFrom = normalizeJid(`${rawNumber}@s.whatsapp.net`);
+        if (connection === "open") {
+          sessions[userId].connected = true;
+          sessions[userId].reconnecting = false;
+          sessions[userId].phoneNumber = sock.user?.id?.split(":")[0] || "";
+          console.log(`✅ Connected: \( {userId} ( \){sessions[userId].phoneNumber})`);
+        }
 
-        console.log(`📨 [${new Date().toISOString()}] Received from \( {getPhoneNumber(normalizedFrom)} ( \){normalizedFrom}): ${text}`);
+        if (connection === "close") {
+          sessions[userId].connected = false;
+          console.log(`❌ Disconnected: ${userId}`);
 
-        setImmediate(() => {
-          axios.post(`${BACKEND_URL}/webhook`, {
-            userId, 
-            from: normalizedFrom, 
-            text, 
-            platform: "whatsapp",
-            messageId, 
-            timestamp: Date.now()
-          }, {
-            headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
-            timeout: 15000
-          }).catch(err => console.error("❌ Backend webhook failed:", err?.message));
-        });
-      } catch (err) {
-        console.error("❌ Message error:", err);
+          const shouldReconnect =
+            (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+
+          if (shouldReconnect && !sessions[userId]?.reconnecting) {
+            sessions[userId].reconnecting = true;
+            console.log(`🔄 Reconnecting ${userId} in 8s...`);
+            setTimeout(() => createSession(userId), 8000);
+          }
+        }
+      }
+
+      // Messages
+      if (events["messages.upsert"]) {
+        const upsert = events["messages.upsert"];
+        if (upsert.type !== "notify") return;
+
+        for (const msg of upsert.messages) {
+          if (
+            msg.key.fromMe ||
+            msg.broadcast ||
+            msg.messageStubType ||
+            !msg.message
+          )
+            continue;
+
+          const from = msg.key.remoteJid!;
+          if (!from || from === "status@broadcast" || from.endsWith("@g.us")) continue;
+
+          // Extract text
+          const text =
+            msg.message.conversation ||
+            msg.message.extendedTextMessage?.text ||
+            msg.message.imageMessage?.caption ||
+            msg.message.videoMessage?.caption ||
+            "";
+
+          if (!text?.trim()) continue;
+
+          const messageId = msg.key.id!;
+          if (processedMessages.has(messageId)) continue;
+          processedMessages.add(messageId);
+          setTimeout(() => processedMessages.delete(messageId), 120000);
+
+          const normalizedFrom = normalizeJid(from);
+          const phone = getPhoneNumber(normalizedFrom);
+
+          console.log(`📨 Received from ${phone}: ${text.substring(0, 100)}`);
+
+          // AI Sales Bot Logic - Only respond to personal chats, with cooldown
+          if (isPersonalChat(normalizedFrom)) {
+            const now = Date.now();
+            const lastResponse = responseCooldown.get(normalizedFrom) || 0;
+
+            if (now - lastResponse > COOLDOWN_MS) {
+              responseCooldown.set(normalizedFrom, now);
+
+              // Forward to backend for AI processing
+              setImmediate(() => {
+                axios
+                  .post(
+                    `${BACKEND_URL}/webhook`,
+                    {
+                      userId,
+                      from: normalizedFrom,
+                      text,
+                      platform: "whatsapp",
+                      messageId,
+                      timestamp: Date.now(),
+                    },
+                    {
+                      headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
+                      timeout: 15000,
+                    }
+                  )
+                  .catch((err) =>
+                    console.error("❌ Backend webhook failed:", err?.message)
+                  );
+              });
+            } else {
+              console.log(`⏳ Cooldown active for ${phone}, skipping AI response`);
+            }
+          }
+        }
       }
     });
   } catch (err) {
-    console.error(`❌ Session failed: ${userId}`, err);
+    console.error(`❌ Session creation failed for ${userId}:`, err);
   }
 }
 
@@ -210,31 +260,35 @@ async function createSession(userId: string) {
 // ========================
 
 app.post("/connect", async (req, res) => {
-  console.log(`🔄 [${new Date().toISOString()}] POST /connect called`);
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "userId required" });
-  if (!sessions[userId]) await createSession(userId);
+
+  if (!sessions[userId]) {
+    await createSession(userId);
+  }
   res.json({ success: true });
 });
 
 app.get("/qr/:userId", (req, res) => {
-  console.log(`🔄 [\( {new Date().toISOString()}] GET /qr/ \){req.params.userId}`);
   const session = sessions[req.params.userId];
   if (!session) return res.status(404).json({ error: "Session not found" });
-  res.json({ qr: session.qr, connected: session.connected });
+
+  res.json({
+    qr: session.qr,
+    connected: session.connected,
+    phoneNumber: session.phoneNumber,
+  });
 });
 
 app.get("/status/:userId", (req, res) => {
-  console.log(`🔄 [\( {new Date().toISOString()}] GET /status/ \){req.params.userId}`);
   const session = sessions[req.params.userId];
-  res.json({ 
-    connected: !!session?.connected, 
-    phoneNumber: session?.phoneNumber || null 
+  res.json({
+    connected: !!session?.connected,
+    phoneNumber: session?.phoneNumber || null,
   });
 });
 
 app.post("/send-message", async (req, res) => {
-  console.log(`🔄 [${new Date().toISOString()}] POST /send-message received`);
   try {
     const { userId, to, text } = req.body;
     if (!userId || !to || !text) return res.status(400).json({ error: "Missing fields" });
@@ -242,16 +296,14 @@ app.post("/send-message", async (req, res) => {
     const session = sessions[userId];
     if (!session?.connected) return res.status(400).json({ error: "Session not connected" });
 
-    await sendMessage(session, normalizeJid(to), text, "External /send-message");
+    await sendMessage(session, normalizeJid(to), text, "External API");
     res.json({ success: true });
   } catch (err: any) {
-    console.error("❌ /send-message failed:", err);
     res.status(500).json({ error: err?.message || "Send failed" });
   }
 });
 
 app.post("/send-reply", async (req, res) => {
-  console.log(`🔄 [${new Date().toISOString()}] POST /send-reply received FROM BACKEND`);
   try {
     const { userId, to, text } = req.body;
     if (!userId || !to || !text) return res.status(400).json({ error: "Missing fields" });
@@ -259,19 +311,19 @@ app.post("/send-reply", async (req, res) => {
     const session = sessions[userId];
     if (!session?.connected) return res.status(400).json({ error: "Session not connected" });
 
-    await sendMessage(session, normalizeJid(to), text, "Backend /send-reply");
+    await sendMessage(session, normalizeJid(to), text, "AI Backend");
     res.json({ success: true });
   } catch (err: any) {
-    console.error("❌ /send-reply failed:", err);
     res.status(500).json({ error: err?.message || "Send failed" });
   }
 });
 
 app.post("/disconnect", async (req, res) => {
-  console.log(`🔄 [${new Date().toISOString()}] POST /disconnect called`);
   const { userId } = req.body;
   if (sessions[userId]) {
-    try { await sessions[userId].sock.logout(); } catch {}
+    try {
+      await sessions[userId].sock.logout();
+    } catch {}
     delete sessions[userId];
   }
   res.json({ success: true });
@@ -280,5 +332,5 @@ app.post("/disconnect", async (req, res) => {
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Gateway running on port ${PORT}`);
+  console.log(`🚀 WhatsApp AI Sales Bot Gateway running on port ${PORT}`);
 });
