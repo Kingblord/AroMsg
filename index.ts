@@ -60,36 +60,38 @@ function normalizeJid(jid: string) {
 }
 
 // ========================
-// DETAILED SEND MESSAGE
+// ENHANCED SEND MESSAGE WITH DETAILED LOGS
 // ========================
 
-async function sendMessage(session: any, jid: string, text: string, source: string = "unknown") {
+async function sendMessage(session: any, jid: string, text: string, source: string = "Unknown") {
   const timestamp = new Date().toISOString();
-  console.log(`🔄 [${timestamp}] ${source} → Attempting to send to ${jid}`);
-  console.log(`📝 Message content: \( {text.substring(0, 100)} \){text.length > 100 ? '...' : ''}`);
+  console.log(`🔄 [${timestamp}] ${source} → START sending to ${jid}`);
+  console.log(`📝 Message content: \( {text.substring(0, 80)} \){text.length > 80 ? '...' : ''}`);
 
   try {
-    const result = await session.sock.sendMessage(jid, { text }, {
+    const result = await session.sock.sendMessage(jid, { 
+      text 
+    }, {
       linkPreview: false,
+      ephemeralExpiration: undefined,
     });
 
     console.log(`✅ [${timestamp}] ${source} → MESSAGE SENT SUCCESSFULLY to ${jid}`);
-    console.log(`📨 Baileys Message ID: ${result?.key?.id || 'N/A'}`);
+    console.log(`📨 Message ID: ${result?.key?.id || 'N/A'}`);
     return result;
   } catch (err: any) {
     console.error(`❌ [${timestamp}] ${source} → SEND FAILED to ${jid}`);
-    console.error(`Error: ${err.message || JSON.stringify(err)}`);
+    console.error(`Error: ${err.message || err}`);
     throw err;
   }
 }
 
 // ========================
-// CREATE SESSION
+// CREATE SESSION (Unchanged except minor log)
 // ========================
 
 async function createSession(userId: string) {
   try {
-    console.log(`🔄 [${new Date().toISOString()}] Creating session for ${userId}`);
     const authPath = path.join(SESSIONS_DIR, userId);
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
     const { version } = await fetchLatestBaileysVersion();
@@ -102,6 +104,7 @@ async function createSession(userId: string) {
       connectTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
       retryRequestDelayMs: 5000,
+      defaultQueryTimeoutMs: undefined,
     });
 
     sessions[userId] = { sock, connected: false, reconnecting: false };
@@ -113,23 +116,30 @@ async function createSession(userId: string) {
 
       if (qr) {
         sessions[userId].qr = await QRCode.toDataURL(qr);
-        console.log(`📱 [${new Date().toISOString()}] QR Generated for ${userId}`);
+        console.log(`📱 QR Generated: ${userId}`);
       }
 
       if (connection === "open") {
         sessions[userId].connected = true;
         sessions[userId].reconnecting = false;
         sessions[userId].phoneNumber = sock.user?.id?.split(":")[0] || "";
-        console.log(`✅ [${new Date().toISOString()}] ✅ SESSION CONNECTED: ${userId}`);
+        console.log(`✅ Connected: ${userId}`);
       }
 
       if (connection === "close") {
         sessions[userId].connected = false;
-        console.log(`❌ [${new Date().toISOString()}] Disconnected: ${userId}`);
+        console.log(`❌ Disconnected: ${userId}`);
+
+        const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
+        if (shouldReconnect && !sessions[userId]?.reconnecting) {
+          sessions[userId].reconnecting = true;
+          delete sessions[userId];
+          setTimeout(() => createSession(userId), 8000);
+        }
       }
     });
 
-    // Incoming Messages
+    // Messages Handler
     sock.ev.on("messages.upsert", async ({ messages }) => {
       try {
         const msg = messages[0];
@@ -145,31 +155,29 @@ async function createSession(userId: string) {
 
         if (!text?.trim()) return;
 
+        const messageId = msg.key.id || "";
+        if (processedMessages.has(messageId)) return;
+        processedMessages.add(messageId);
+        setTimeout(() => processedMessages.delete(messageId), 60000);
+
         const normalizedFrom = normalizeJid(from);
-        console.log(`📨 [${new Date().toISOString()}] INCOMING MESSAGE from ${normalizedFrom}: ${text}`);
+        console.log(`📨 [${new Date().toISOString()}] Received WhatsApp message from ${normalizedFrom}: ${text}`);
 
         setImmediate(() => {
-          console.log(`➡️ [${new Date().toISOString()}] Forwarding message to Backend...`);
           axios.post(`${BACKEND_URL}/webhook`, {
-            userId, 
-            from: normalizedFrom, 
-            text, 
-            platform: "whatsapp",
-            messageId: msg.key.id,
-            timestamp: Date.now()
+            userId, from: normalizedFrom, text, platform: "whatsapp",
+            messageId, timestamp: Date.now()
           }, {
             headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
             timeout: 15000
-          })
-          .then(() => console.log(`✅ [${new Date().toISOString()}] Webhook sent to Backend successfully`))
-          .catch(err => console.error("❌ Backend webhook failed:", err?.message));
+          }).catch(err => console.error("❌ Backend webhook failed:", err?.message));
         });
       } catch (err) {
-        console.error("❌ Message processing error:", err);
+        console.error("❌ Message error:", err);
       }
     });
   } catch (err) {
-    console.error(`❌ Session failed for ${userId}:`, err);
+    console.error(`❌ Session failed: ${userId}`, err);
   }
 }
 
@@ -178,16 +186,14 @@ async function createSession(userId: string) {
 // ========================
 
 app.post("/connect", async (req, res) => {
-  console.log(`🔄 [${new Date().toISOString()}] POST /connect called with body:`, req.body);
+  console.log(`🔄 [${new Date().toISOString()}] POST /connect called`);
   const { userId } = req.body;
   if (!userId) {
-    console.log(`⚠️ Missing userId in /connect`);
+    console.log(`⚠️ /connect - Missing userId`);
     return res.status(400).json({ error: "userId required" });
   }
-  if (!sessions[userId]) {
-    console.log(`🔄 Creating new session for ${userId}`);
-    await createSession(userId);
-  }
+  if (!sessions[userId]) await createSession(userId);
+  console.log(`✅ /connect successful for user: ${userId}`);
   res.json({ success: true });
 });
 
@@ -195,7 +201,7 @@ app.get("/qr/:userId", (req, res) => {
   console.log(`🔄 [\( {new Date().toISOString()}] GET /qr/ \){req.params.userId}`);
   const session = sessions[req.params.userId];
   if (!session) {
-    console.log(`⚠️ Session not found for QR`);
+    console.log(`⚠️ QR - Session not found`);
     return res.status(404).json({ error: "Session not found" });
   }
   res.json({ qr: session.qr, connected: session.connected });
@@ -211,17 +217,17 @@ app.get("/status/:userId", (req, res) => {
 });
 
 app.post("/send-message", async (req, res) => {
-  console.log(`🔄 [${new Date().toISOString()}] POST /send-message called`);
+  console.log(`🔄 [${new Date().toISOString()}] POST /send-message received`);
   try {
     const { userId, to, text } = req.body;
     if (!userId || !to || !text) {
-      console.log(`⚠️ Missing fields in /send-message`);
+      console.log(`⚠️ /send-message - Missing fields`);
       return res.status(400).json({ error: "Missing fields" });
     }
 
     const session = sessions[userId];
     if (!session?.connected) {
-      console.log(`⚠️ Session ${userId} not connected`);
+      console.log(`⚠️ /send-message - Session not connected`);
       return res.status(400).json({ error: "Session not connected" });
     }
 
@@ -234,36 +240,36 @@ app.post("/send-message", async (req, res) => {
 });
 
 app.post("/send-reply", async (req, res) => {
-  console.log(`🔄 [${new Date().toISOString()}] POST /send-reply called from Backend`);
+  console.log(`🔄 [${new Date().toISOString()}] POST /send-reply received FROM BACKEND`);
   try {
     const { userId, to, text } = req.body;
     if (!userId || !to || !text) {
-      console.log(`⚠️ Missing fields in /send-reply`);
+      console.log(`⚠️ /send-reply - Missing fields`);
       return res.status(400).json({ error: "Missing fields" });
     }
 
     const session = sessions[userId];
     if (!session?.connected) {
-      console.log(`⚠️ Session ${userId} not connected for reply`);
+      console.log(`⚠️ /send-reply - Session not connected`);
       return res.status(400).json({ error: "Session not connected" });
     }
 
     await sendMessage(session, normalizeJid(to), text, "Backend /send-reply");
     res.json({ success: true });
   } catch (err: any) {
-    console.error(`❌ [${new Date().toISOString()}] /send-reply failed:`, err.message);
+    console.error("❌ /send-reply failed:", err);
     res.status(500).json({ error: err?.message || "Send failed" });
   }
 });
 
 app.post("/disconnect", async (req, res) => {
-  console.log(`🔄 [${new Date().toISOString()}] POST /disconnect called`, req.body);
+  console.log(`🔄 [${new Date().toISOString()}] POST /disconnect called`);
   const { userId } = req.body;
   if (sessions[userId]) {
     try { await sessions[userId].sock.logout(); } catch {}
     delete sessions[userId];
-    console.log(`✅ Session ${userId} disconnected`);
   }
+  console.log(`✅ /disconnect completed for ${userId}`);
   res.json({ success: true });
 });
 
@@ -273,5 +279,5 @@ app.get("/health", (_, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Gateway running on port ${PORT} - Detailed logging enabled`);
+  console.log(`🚀 Gateway running on port ${PORT}`);
 });
