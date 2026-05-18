@@ -48,68 +48,58 @@ const sessions: Record<string, SessionData> = {};
 const processedMessages = new Set<string>();
 
 // ========================
-// HELPERS
+// HELPERS - IMPROVED JID HANDLING
 // ========================
 
 function normalizeJid(jid: string): string {
   if (!jid) return jid;
-  
-  // Clean up any extra spaces or hidden characters
-  let cleanJid = jid.trim();
 
-  // If it's an LID identifier, map it properly
-  if (cleanJid.endsWith("@lid")) {
-    cleanJid = `${cleanJid.replace("@lid", "")}@s.whatsapp.net`;
-  }
-  
-  // If it's a malformed whatsapp suffix (like @s.whatsapp missing .net)
-  if (cleanJid.endsWith("@s.whatsapp")) {
-    cleanJid = `${cleanJid}.net`;
+  let clean = jid.trim();
+
+  // Remove any existing @ suffix
+  clean = clean.split('@')[0];
+
+  // Handle LID format
+  if (jid.endsWith("@lid")) {
+    clean = jid.replace("@lid", "");
   }
 
-  // If it's a group JID, let it pass through unaltered
-  if (cleanJid.endsWith("@g.us")) {
-    return cleanJid;
-  }
-
-  // If there's no domain suffix at all, add the default one
-  if (!cleanJid.includes("@")) {
-    return `${cleanJid}@s.whatsapp.net`;
-  }
-
-  return cleanJid;
+  return `${clean}@s.whatsapp.net`;
 }
 
+function getPhoneNumber(jid: string): string {
+  if (!jid) return "";
+  return jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+}
 
 // ========================
-// ENHANCED SEND MESSAGE
+// CLEAN SEND MESSAGE
 // ========================
 
 async function sendMessage(session: any, jid: string, text: string, source: string = "Unknown") {
   const timestamp = new Date().toISOString();
-  console.log(`🔄 [${timestamp}] ${source} → START sending to ${jid}`);
+  const phone = getPhoneNumber(jid);
+
+  console.log(`🔄 [${timestamp}] ${source} → START sending to \( {phone} ( \){jid})`);
   console.log(`📝 [${timestamp}] Message: \( {text.substring(0, 100)} \){text.length > 100 ? '...' : ''}`);
 
   try {
-    const result = await session.sock.sendMessage(jid, { 
-      text 
-    }, {
+    const result = await session.sock.sendMessage(jid, { text }, {
       linkPreview: false,
-      ephemeralExpiration: undefined,
     });
 
-    console.log(`✅ [${timestamp}] ${source} → MESSAGE SENT SUCCESSFULLY to ${jid}`);
+    console.log(`✅ [${timestamp}] ${source} → MESSAGE SENT SUCCESSFULLY to ${phone}`);
     console.log(`📨 [${timestamp}] Message ID: ${result?.key?.id || 'N/A'}`);
     return result;
   } catch (err: any) {
-    console.error(`❌ [${timestamp}] ${source} → SEND FAILED to ${jid}`);
-    console.error(`Error: ${err.message || err}`);
+    console.error(`❌ [${timestamp}] ${source} → SEND FAILED to ${phone}`);
+    console.error(`Error:`, err.message || err);
     throw err;
   }
 }
 
 // ========================
-// CREATE SESSION (Kept Original Logic)
+// CREATE SESSION (UNTOUCHED LOGIC)
 // ========================
 
 async function createSession(userId: string) {
@@ -161,7 +151,7 @@ async function createSession(userId: string) {
       }
     });
 
-        sock.ev.on("messages.upsert", async ({ messages }) => {
+    sock.ev.on("messages.upsert", async ({ messages }) => {
       try {
         const msg = messages[0];
         if (!msg?.message || msg.key.fromMe || msg.broadcast || msg.messageStubType) return;
@@ -181,35 +171,16 @@ async function createSession(userId: string) {
         processedMessages.add(messageId);
         setTimeout(() => processedMessages.delete(messageId), 60000);
 
-        // ==========================================
-        // DYNAMIC REAL SENDER EXTRACTION (NO HARDCODING)
-        // ==========================================
+        // Dynamic Real Sender Extraction
         let dynamicTargetJid = from;
-
-        // 1. Check if the message came from a multi-device companion session
         if (msg.key.participant) {
           dynamicTargetJid = msg.key.participant;
-        } 
-        // 2. Check internal message context metadata for a real device owner JID
-        else if ((msg.message as any)?.messageContextInfo?.deviceListMetadata?.recipientKeyIndicator) {
-          const contextId = (msg.message as any).messageContextInfo.deviceListMetadata.recipientKeyIndicator;
-          if (contextId && typeof contextId === "string" && !contextId.startsWith("978959")) {
-            dynamicTargetJid = contextId;
-          }
         }
 
-        // Clean up device suffixes (like @s.whatsapp.net:1 or device splits)
         let rawNumber = dynamicTargetJid.split("@")[0].split(":")[0];
-        
-        // Fallback: If it still picked up the ghost identifier, fallback to standard parsing safely
-        if (rawNumber.startsWith("978959") && from.includes("@")) {
-          rawNumber = from.split("@")[0].split(":")[0];
-        }
-
         const normalizedFrom = normalizeJid(`${rawNumber}@s.whatsapp.net`);
-        // ==========================================
 
-        console.log(`📨 [${new Date().toISOString()}] Received from ${normalizedFrom}: ${text}`);
+        console.log(`📨 [${new Date().toISOString()}] Received from \( {getPhoneNumber(normalizedFrom)} ( \){normalizedFrom}): ${text}`);
 
         setImmediate(() => {
           axios.post(`${BACKEND_URL}/webhook`, {
@@ -232,8 +203,6 @@ async function createSession(userId: string) {
     console.error(`❌ Session failed: ${userId}`, err);
   }
 }
-
-
 
 // ========================
 // ROUTES
