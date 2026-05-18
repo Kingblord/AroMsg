@@ -603,6 +603,44 @@ app.post(
 );
 
 // ========================
+// SEND REPLY FROM BACKEND
+// ========================
+
+app.post(
+  "/send-reply",
+  async (req, res) => {
+    try {
+      const { userId, to, text } = req.body;
+
+      if (!userId || !to || !text) {
+        return res.status(400).json({ error: "Missing fields" });
+      }
+
+      const session = sessions[userId];
+
+      if (!session?.connected) {
+        return res.status(400).json({ 
+          error: "Session not connected" 
+        });
+      }
+
+      const jid = normalizeJid(to);
+
+      await session.sock.sendMessage(jid, { text });
+
+      console.log(`📤 Reply sent to ${jid}: ${text.substring(0, 50)}...`);
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("❌ Send reply failed:", err);
+      res.status(500).json({ 
+        error: err?.message || "Failed to send reply" 
+      });
+    }
+  }
+);
+
+// ========================
 // DISCONNECT
 // ========================
 
