@@ -106,7 +106,7 @@ app.post(
 // ========================
 
 app.get(
-  "/",
+  "/health",
   (_, res) => {
 
     res.send(
