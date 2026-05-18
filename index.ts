@@ -60,25 +60,26 @@ function normalizeJid(jid: string) {
 }
 
 // ========================
-// IMPROVED SEND MESSAGE
+// IMPROVED SEND MESSAGE WITH DETAILED LOGS
 // ========================
 
-async function sendMessage(session: any, jid: string, text: string) {
-  try {
-    console.log(`📤 Attempting to send to ${jid}: ${text.substring(0, 50)}...`);
+async function sendMessage(session: any, jid: string, text: string, source: string = "unknown") {
+  console.log(`🔄 [${new Date().toISOString()}] ${source} → Attempting to send to ${jid}`);
+  console.log(`📝 Message: \( {text.substring(0, 100)} \){text.length > 100 ? '...' : ''}`);
 
+  try {
     const result = await session.sock.sendMessage(jid, { 
       text 
     }, {
-      // These options improve delivery reliability
       linkPreview: false,
-      ephemeralExpiration: undefined,
     });
 
-    console.log(`✅ Message sent successfully to ${jid}`, result?.key?.id || '');
+    console.log(`✅ [${new Date().toISOString()}] ${source} → Message SENT SUCCESSFULLY to ${jid}`);
+    console.log(`📨 Message ID: ${result?.key?.id || 'N/A'}`);
     return result;
   } catch (err: any) {
-    console.error(`❌ Send failed to ${jid}:`, err.message || err);
+    console.error(`❌ [${new Date().toISOString()}] ${source} → Send FAILED to ${jid}`);
+    console.error(`Error: ${err.message || err}`);
     throw err;
   }
 }
@@ -101,7 +102,6 @@ async function createSession(userId: string) {
       connectTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
       retryRequestDelayMs: 5000,
-      defaultQueryTimeoutMs: undefined,
     });
 
     sessions[userId] = { sock, connected: false, reconnecting: false };
@@ -113,30 +113,23 @@ async function createSession(userId: string) {
 
       if (qr) {
         sessions[userId].qr = await QRCode.toDataURL(qr);
-        console.log(`📱 QR Generated: ${userId}`);
+        console.log(`📱 [${new Date().toISOString()}] QR Generated for ${userId}`);
       }
 
       if (connection === "open") {
         sessions[userId].connected = true;
         sessions[userId].reconnecting = false;
         sessions[userId].phoneNumber = sock.user?.id?.split(":")[0] || "";
-        console.log(`✅ Connected: ${userId}`);
+        console.log(`✅ [${new Date().toISOString()}] Connected successfully: ${userId}`);
       }
 
       if (connection === "close") {
         sessions[userId].connected = false;
-        console.log(`❌ Disconnected: ${userId}`);
-
-        const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
-        if (shouldReconnect && !sessions[userId]?.reconnecting) {
-          sessions[userId].reconnecting = true;
-          delete sessions[userId];
-          setTimeout(() => createSession(userId), 8000);
-        }
+        console.log(`❌ [${new Date().toISOString()}] Disconnected: ${userId}`);
       }
     });
 
-    // Messages Handler
+    // Incoming Messages → Backend
     sock.ev.on("messages.upsert", async ({ messages }) => {
       try {
         const msg = messages[0];
@@ -152,36 +145,81 @@ async function createSession(userId: string) {
 
         if (!text?.trim()) return;
 
-        const messageId = msg.key.id || "";
-        if (processedMessages.has(messageId)) return;
-        processedMessages.add(messageId);
-        setTimeout(() => processedMessages.delete(messageId), 60000);
-
         const normalizedFrom = normalizeJid(from);
-        console.log(`📨 ${normalizedFrom}: ${text}`);
+        console.log(`📨 [${new Date().toISOString()}] Received from ${normalizedFrom}: ${text}`);
 
         setImmediate(() => {
           axios.post(`${BACKEND_URL}/webhook`, {
-            userId, from: normalizedFrom, text, platform: "whatsapp",
-            messageId, timestamp: Date.now()
+            userId, 
+            from: normalizedFrom, 
+            text, 
+            platform: "whatsapp",
+            messageId: msg.key.id,
+            timestamp: Date.now()
           }, {
             headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
             timeout: 15000
-          }).catch(err => console.error("❌ Webhook failed:", err?.message));
+          }).catch(err => console.error("❌ Backend webhook failed:", err?.message));
         });
       } catch (err) {
-        console.error("❌ Message error:", err);
+        console.error("❌ Message processing error:", err);
       }
     });
   } catch (err) {
-    console.error(`❌ Session failed: ${userId}`, err);
+    console.error(`❌ Session failed for ${userId}:`, err);
   }
 }
 
 // ========================
-// ROUTES
+// ROUTES WITH DETAILED LOGGING
 // ========================
 
+app.post("/send-message", async (req, res) => {
+  console.log(`🔄 [${new Date().toISOString()}] /send-message endpoint HIT from external call`);
+  try {
+    const { userId, to, text } = req.body;
+    if (!userId || !to || !text) {
+      console.log(`⚠️ Missing fields in /send-message`);
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const session = sessions[userId];
+    if (!session?.connected) {
+      console.log(`⚠️ Session ${userId} not connected`);
+      return res.status(400).json({ error: "Session not connected" });
+    }
+
+    await sendMessage(session, normalizeJid(to), text, "External /send-message");
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Send failed" });
+  }
+});
+
+app.post("/send-reply", async (req, res) => {
+  console.log(`🔄 [${new Date().toISOString()}] /send-reply endpoint HIT from Backend`);
+  try {
+    const { userId, to, text } = req.body;
+    if (!userId || !to || !text) {
+      console.log(`⚠️ Missing fields in /send-reply`);
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const session = sessions[userId];
+    if (!session?.connected) {
+      console.log(`⚠️ Session ${userId} not connected when trying to send reply`);
+      return res.status(400).json({ error: "Session not connected" });
+    }
+
+    await sendMessage(session, normalizeJid(to), text, "Backend /send-reply");
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error(`❌ [${new Date().toISOString()}] Send reply failed:`, err.message);
+    res.status(500).json({ error: err?.message || "Send failed" });
+  }
+});
+
+// Other routes...
 app.post("/connect", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "userId required" });
@@ -198,37 +236,6 @@ app.get("/qr/:userId", (req, res) => {
 app.get("/status/:userId", (req, res) => {
   const session = sessions[req.params.userId];
   res.json({ connected: !!session?.connected, phoneNumber: session?.phoneNumber || null });
-});
-
-app.post("/send-message", async (req, res) => {
-  try {
-    const { userId, to, text } = req.body;
-    if (!userId || !to || !text) return res.status(400).json({ error: "Missing fields" });
-
-    const session = sessions[userId];
-    if (!session?.connected) return res.status(400).json({ error: "Session not connected" });
-
-    await sendMessage(session, normalizeJid(to), text);
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ error: err?.message || "Send failed" });
-  }
-});
-
-app.post("/send-reply", async (req, res) => {
-  try {
-    const { userId, to, text } = req.body;
-    if (!userId || !to || !text) return res.status(400).json({ error: "Missing fields" });
-
-    const session = sessions[userId];
-    if (!session?.connected) return res.status(400).json({ error: "Session not connected" });
-
-    await sendMessage(session, normalizeJid(to), text);
-    res.json({ success: true });
-  } catch (err: any) {
-    console.error("❌ Send reply failed:", err);
-    res.status(500).json({ error: err?.message || "Send failed" });
-  }
 });
 
 app.post("/disconnect", async (req, res) => {
