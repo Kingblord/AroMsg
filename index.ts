@@ -161,55 +161,78 @@ async function createSession(userId: string) {
       }
     });
 
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-  try {
-    const msg = messages[0];
-    if (!msg?.message || msg.key.fromMe || msg.broadcast || msg.messageStubType) return;
+        sock.ev.on("messages.upsert", async ({ messages }) => {
+      try {
+        const msg = messages[0];
+        if (!msg?.message || msg.key.fromMe || msg.broadcast || msg.messageStubType) return;
 
-    const from = msg.key.remoteJid;
-    if (!from || from === "status@broadcast" || from.endsWith("@g.us")) return;
+        const from = msg.key.remoteJid;
+        if (!from || from === "status@broadcast" || from.endsWith("@g.us")) return;
 
-    const text = msg.message.conversation || 
-                msg.message.extendedTextMessage?.text ||
-                msg.message.imageMessage?.caption ||
-                msg.message.videoMessage?.caption;
+        const text = msg.message.conversation || 
+                    msg.message.extendedTextMessage?.text ||
+                    msg.message.imageMessage?.caption ||
+                    msg.message.videoMessage?.caption;
 
-    if (!text?.trim()) return;
+        if (!text?.trim()) return;
 
-    // --- FIX START ---
-    // Extract the raw number part
-    let rawNumber = from.split("@")[0];
-    
-    // If Baileys provides a participant or a cross-device sender ID, clean it up
-    if (msg.key.participant) {
-      rawNumber = msg.key.participant.split("@")[0].split(":")[0];
-    } else if (rawNumber.includes(":")) {
-      rawNumber = rawNumber.split(":")[0];
-    }
+        const messageId = msg.key.id || "";
+        if (processedMessages.has(messageId)) return;
+        processedMessages.add(messageId);
+        setTimeout(() => processedMessages.delete(messageId), 60000);
 
-    // Reconstruct a clean, standard JID
-    const normalizedFrom = `${rawNumber}@s.whatsapp.net`;
-    // --- FIX END ---
+        // ==========================================
+        // DYNAMIC REAL SENDER EXTRACTION (NO HARDCODING)
+        // ==========================================
+        let dynamicTargetJid = from;
 
-    console.log(`📨 [${new Date().toISOString()}] Received from ${normalizedFrom}: ${text}`);
+        // 1. Check if the message came from a multi-device companion session
+        if (msg.key.participant) {
+          dynamicTargetJid = msg.key.participant;
+        } 
+        // 2. Check internal message context metadata for a real device owner JID
+        else if ((msg.message as any)?.messageContextInfo?.deviceListMetadata?.recipientKeyIndicator) {
+          const contextId = (msg.message as any).messageContextInfo.deviceListMetadata.recipientKeyIndicator;
+          if (contextId && typeof contextId === "string" && !contextId.startsWith("978959")) {
+            dynamicTargetJid = contextId;
+          }
+        }
 
-    setImmediate(() => {
-      axios.post(`${BACKEND_URL}/webhook`, {
-        userId, 
-        from: normalizedFrom, // Sending the clean ID to your backend
-        text, 
-        platform: "whatsapp",
-        messageId: msg.key.id, 
-        timestamp: Date.now()
-      }, {
-        headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
-        timeout: 15000
-      }).catch(err => console.error("❌ Backend webhook failed:", err?.message));
+        // Clean up device suffixes (like @s.whatsapp.net:1 or device splits)
+        let rawNumber = dynamicTargetJid.split("@")[0].split(":")[0];
+        
+        // Fallback: If it still picked up the ghost identifier, fallback to standard parsing safely
+        if (rawNumber.startsWith("978959") && from.includes("@")) {
+          rawNumber = from.split("@")[0].split(":")[0];
+        }
+
+        const normalizedFrom = normalizeJid(`${rawNumber}@s.whatsapp.net`);
+        // ==========================================
+
+        console.log(`📨 [${new Date().toISOString()}] Received from ${normalizedFrom}: ${text}`);
+
+        setImmediate(() => {
+          axios.post(`${BACKEND_URL}/webhook`, {
+            userId, 
+            from: normalizedFrom, 
+            text, 
+            platform: "whatsapp",
+            messageId, 
+            timestamp: Date.now()
+          }, {
+            headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
+            timeout: 15000
+          }).catch(err => console.error("❌ Backend webhook failed:", err?.message));
+        });
+      } catch (err) {
+        console.error("❌ Message error:", err);
+      }
     });
   } catch (err) {
-    console.error("❌ Message error:", err);
+    console.error(`❌ Session failed: ${userId}`, err);
   }
-});
+}
+
 
 
 // ========================
