@@ -17,7 +17,6 @@ import QRCode from "qrcode";
 dotenv.config();
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
@@ -25,15 +24,8 @@ const PORT = Number(process.env.PORT) || 3001;
 const BACKEND_URL = process.env.BACKEND_URL;
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
 
-// ========================
-// VALIDATION
-// ========================
-if (!BACKEND_URL) {
-  console.error("❌ BACKEND_URL is not set in .env");
-  process.exit(1);
-}
-if (!INTERNAL_API_KEY) {
-  console.error("❌ INTERNAL_API_KEY is not set in .env");
+if (!BACKEND_URL || !INTERNAL_API_KEY) {
+  console.error("❌ Missing BACKEND_URL or INTERNAL_API_KEY in .env");
   process.exit(1);
 }
 
@@ -44,10 +36,6 @@ if (!INTERNAL_API_KEY) {
 const SESSIONS_DIR = path.join(process.cwd(), "sessions");
 mkdirSync(SESSIONS_DIR, { recursive: true });
 
-// ========================
-// TYPES
-// ========================
-
 interface SessionData {
   sock: any;
   qr?: string;
@@ -55,10 +43,6 @@ interface SessionData {
   reconnecting: boolean;
   phoneNumber?: string;
 }
-
-// ========================
-// MEMORY STORE
-// ========================
 
 const sessions: Record<string, SessionData> = {};
 const processedMessages = new Set<string>();
@@ -81,11 +65,20 @@ function normalizeJid(jid: string) {
 
 async function sendMessage(session: any, jid: string, text: string) {
   try {
-    const result = await session.sock.sendMessage(jid, { text });
-    console.log(`✅ Message sent successfully to ${jid}`);
+    console.log(`📤 Attempting to send to ${jid}: ${text.substring(0, 50)}...`);
+
+    const result = await session.sock.sendMessage(jid, { 
+      text 
+    }, {
+      // These options improve delivery reliability
+      linkPreview: false,
+      ephemeralExpiration: undefined,
+    });
+
+    console.log(`✅ Message sent successfully to ${jid}`, result?.key?.id || '');
     return result;
   } catch (err: any) {
-    console.error(`❌ Failed to send message to ${jid}:`, err.message || err);
+    console.error(`❌ Send failed to ${jid}:`, err.message || err);
     throw err;
   }
 }
@@ -97,7 +90,6 @@ async function sendMessage(session: any, jid: string, text: string) {
 async function createSession(userId: string) {
   try {
     const authPath = path.join(SESSIONS_DIR, userId);
-
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -109,24 +101,19 @@ async function createSession(userId: string) {
       connectTimeoutMs: 60000,
       keepAliveIntervalMs: 30000,
       retryRequestDelayMs: 5000,
+      defaultQueryTimeoutMs: undefined,
     });
 
-    sessions[userId] = {
-      sock,
-      connected: false,
-      reconnecting: false,
-    };
+    sessions[userId] = { sock, connected: false, reconnecting: false };
 
     sock.ev.on("creds.update", saveCreds);
 
-    // Connection Events
     sock.ev.on("connection.update", async (update) => {
       const { connection, qr, lastDisconnect } = update;
 
       if (qr) {
-        const qrImage = await QRCode.toDataURL(qr);
-        sessions[userId].qr = qrImage;
-        console.log(`📱 QR Generated for ${userId}`);
+        sessions[userId].qr = await QRCode.toDataURL(qr);
+        console.log(`📱 QR Generated: ${userId}`);
       }
 
       if (connection === "open") {
@@ -140,18 +127,16 @@ async function createSession(userId: string) {
         sessions[userId].connected = false;
         console.log(`❌ Disconnected: ${userId}`);
 
-        const shouldReconnect =
-          (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
-
+        const shouldReconnect = (lastDisconnect?.error as any)?.output?.statusCode !== DisconnectReason.loggedOut;
         if (shouldReconnect && !sessions[userId]?.reconnecting) {
           sessions[userId].reconnecting = true;
           delete sessions[userId];
-          setTimeout(() => createSession(userId), 5000);
+          setTimeout(() => createSession(userId), 8000);
         }
       }
     });
 
-    // Incoming Messages
+    // Messages Handler
     sock.ev.on("messages.upsert", async ({ messages }) => {
       try {
         const msg = messages[0];
@@ -160,11 +145,10 @@ async function createSession(userId: string) {
         const from = msg.key.remoteJid;
         if (!from || from === "status@broadcast" || from.endsWith("@g.us")) return;
 
-        const text =
-          msg.message.conversation ||
-          msg.message.extendedTextMessage?.text ||
-          msg.message.imageMessage?.caption ||
-          msg.message.videoMessage?.caption;
+        const text = msg.message.conversation || 
+                    msg.message.extendedTextMessage?.text ||
+                    msg.message.imageMessage?.caption ||
+                    msg.message.videoMessage?.caption;
 
         if (!text?.trim()) return;
 
@@ -174,31 +158,23 @@ async function createSession(userId: string) {
         setTimeout(() => processedMessages.delete(messageId), 60000);
 
         const normalizedFrom = normalizeJid(from);
-
         console.log(`📨 ${normalizedFrom}: ${text}`);
 
-        // Send to Backend
         setImmediate(() => {
           axios.post(`${BACKEND_URL}/webhook`, {
-            userId,
-            from: normalizedFrom,
-            text,
-            platform: "whatsapp",
-            messageId,
-            timestamp: Date.now(),
+            userId, from: normalizedFrom, text, platform: "whatsapp",
+            messageId, timestamp: Date.now()
           }, {
             headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
-            timeout: 15000,
-          }).catch((err: any) => {
-            console.error("❌ Backend webhook failed:", err?.message || err);
-          });
+            timeout: 15000
+          }).catch(err => console.error("❌ Webhook failed:", err?.message));
         });
       } catch (err) {
-        console.error("❌ Message processing error:", err);
+        console.error("❌ Message error:", err);
       }
     });
   } catch (err) {
-    console.error(`❌ Session creation failed for ${userId}:`, err);
+    console.error(`❌ Session failed: ${userId}`, err);
   }
 }
 
@@ -209,29 +185,21 @@ async function createSession(userId: string) {
 app.post("/connect", async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "userId required" });
-
-  if (!sessions[userId]) {
-    await createSession(userId);
-  }
+  if (!sessions[userId]) await createSession(userId);
   res.json({ success: true });
 });
 
 app.get("/qr/:userId", (req, res) => {
   const session = sessions[req.params.userId];
   if (!session) return res.status(404).json({ error: "Session not found" });
-
   res.json({ qr: session.qr, connected: session.connected });
 });
 
 app.get("/status/:userId", (req, res) => {
   const session = sessions[req.params.userId];
-  res.json({
-    connected: session?.connected || false,
-    phoneNumber: session?.phoneNumber || null,
-  });
+  res.json({ connected: !!session?.connected, phoneNumber: session?.phoneNumber || null });
 });
 
-// IMPROVED SEND MESSAGE
 app.post("/send-message", async (req, res) => {
   try {
     const { userId, to, text } = req.body;
@@ -240,17 +208,13 @@ app.post("/send-message", async (req, res) => {
     const session = sessions[userId];
     if (!session?.connected) return res.status(400).json({ error: "Session not connected" });
 
-    const jid = normalizeJid(to);
-    await sendMessage(session, jid, text);
-
+    await sendMessage(session, normalizeJid(to), text);
     res.json({ success: true });
   } catch (err: any) {
-    console.error("❌ Send failed:", err);
     res.status(500).json({ error: err?.message || "Send failed" });
   }
 });
 
-// SEND REPLY (Used by Backend)
 app.post("/send-reply", async (req, res) => {
   try {
     const { userId, to, text } = req.body;
@@ -259,9 +223,7 @@ app.post("/send-reply", async (req, res) => {
     const session = sessions[userId];
     if (!session?.connected) return res.status(400).json({ error: "Session not connected" });
 
-    const jid = normalizeJid(to);
-    await sendMessage(session, jid, text);
-
+    await sendMessage(session, normalizeJid(to), text);
     res.json({ success: true });
   } catch (err: any) {
     console.error("❌ Send reply failed:", err);
@@ -271,19 +233,14 @@ app.post("/send-reply", async (req, res) => {
 
 app.post("/disconnect", async (req, res) => {
   const { userId } = req.body;
-  const session = sessions[userId];
-  if (session) {
-    try { await session.sock.logout(); } catch {}
+  if (sessions[userId]) {
+    try { await sessions[userId].sock.logout(); } catch {}
     delete sessions[userId];
   }
   res.json({ success: true });
 });
 
 app.get("/health", (_, res) => res.json({ status: "ok" }));
-
-// ========================
-// START SERVER
-// ========================
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Gateway running on port ${PORT}`);
