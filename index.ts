@@ -183,7 +183,7 @@ async function createSession(userId: string) {
             : Number(rawTs) * 1000;
 
         setImmediate(() => {
-          axios.post(`${BACKEND_URL}/webhook`, {
+          axios.post(`${BACKEND_URL}/api/whatsapp/webhook`, {
             userId,
             from: normalizedFrom,
             text,
