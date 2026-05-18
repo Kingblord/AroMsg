@@ -433,6 +433,11 @@ async function createSession(
   }
 }
 
+app.post("/webhook", (req, res) => {
+  console.log("WEBHOOK HIT");
+  res.json({ ok: true });
+});
+
 // ========================
 // CONNECT
 // ========================
