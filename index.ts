@@ -631,12 +631,18 @@ app.post(
       console.log(`📤 Reply sent to ${jid}: ${text.substring(0, 50)}...`);
 
       res.json({ success: true });
-    } catch (err) {
-      console.error("❌ Send reply failed:", err);
-      res.status(500).json({ 
-        error: err?.message || "Failed to send reply" 
-      });
-    }
+   } catch (err) {
+  const errorMessage = err instanceof Error 
+    ? err.message 
+    : String(err);
+
+  console.error("❌ Webhook error:", errorMessage);
+  
+  res.status(500).json({ 
+    success: false, 
+    error: "Internal server error" 
+  });
+}
   }
 );
 
