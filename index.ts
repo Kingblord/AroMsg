@@ -51,13 +51,35 @@ const processedMessages = new Set<string>();
 // HELPERS
 // ========================
 
-function normalizeJid(jid: string) {
+function normalizeJid(jid: string): string {
   if (!jid) return jid;
-  if (jid.endsWith("@s.whatsapp.net")) return jid;
-  if (jid.endsWith("@lid")) return `${jid.replace("@lid", "")}@s.whatsapp.net`;
-  if (!jid.includes("@")) return `${jid}@s.whatsapp.net`;
-  return jid;
+  
+  // Clean up any extra spaces or hidden characters
+  let cleanJid = jid.trim();
+
+  // If it's an LID identifier, map it properly
+  if (cleanJid.endsWith("@lid")) {
+    cleanJid = `${cleanJid.replace("@lid", "")}@s.whatsapp.net`;
+  }
+  
+  // If it's a malformed whatsapp suffix (like @s.whatsapp missing .net)
+  if (cleanJid.endsWith("@s.whatsapp")) {
+    cleanJid = `${cleanJid}.net`;
+  }
+
+  // If it's a group JID, let it pass through unaltered
+  if (cleanJid.endsWith("@g.us")) {
+    return cleanJid;
+  }
+
+  // If there's no domain suffix at all, add the default one
+  if (!cleanJid.includes("@")) {
+    return `${cleanJid}@s.whatsapp.net`;
+  }
+
+  return cleanJid;
 }
+
 
 // ========================
 // ENHANCED SEND MESSAGE
