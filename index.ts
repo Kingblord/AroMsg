@@ -162,49 +162,55 @@ async function createSession(userId: string) {
     });
 
     sock.ev.on("messages.upsert", async ({ messages }) => {
-      try {
-        const msg = messages[0];
-        if (!msg?.message || msg.key.fromMe || msg.broadcast || msg.messageStubType) return;
+  try {
+    const msg = messages[0];
+    if (!msg?.message || msg.key.fromMe || msg.broadcast || msg.messageStubType) return;
 
-        const from = msg.key.remoteJid;
-        if (!from || from === "status@broadcast" || from.endsWith("@g.us")) return;
+    const from = msg.key.remoteJid;
+    if (!from || from === "status@broadcast" || from.endsWith("@g.us")) return;
 
-        const text = msg.message.conversation || 
-                    msg.message.extendedTextMessage?.text ||
-                    msg.message.imageMessage?.caption ||
-                    msg.message.videoMessage?.caption;
+    const text = msg.message.conversation || 
+                msg.message.extendedTextMessage?.text ||
+                msg.message.imageMessage?.caption ||
+                msg.message.videoMessage?.caption;
 
-        if (!text?.trim()) return;
+    if (!text?.trim()) return;
 
-        const messageId = msg.key.id || "";
-        if (processedMessages.has(messageId)) return;
-        processedMessages.add(messageId);
-        setTimeout(() => processedMessages.delete(messageId), 60000);
+    // --- FIX START ---
+    // Extract the raw number part
+    let rawNumber = from.split("@")[0];
+    
+    // If Baileys provides a participant or a cross-device sender ID, clean it up
+    if (msg.key.participant) {
+      rawNumber = msg.key.participant.split("@")[0].split(":")[0];
+    } else if (rawNumber.includes(":")) {
+      rawNumber = rawNumber.split(":")[0];
+    }
 
-        const normalizedFrom = normalizeJid(from);
-        console.log(`📨 [${new Date().toISOString()}] Received from ${normalizedFrom}: ${text}`);
+    // Reconstruct a clean, standard JID
+    const normalizedFrom = `${rawNumber}@s.whatsapp.net`;
+    // --- FIX END ---
 
-        setImmediate(() => {
-          axios.post(`${BACKEND_URL}/webhook`, {
-            userId, 
-            from: normalizedFrom, 
-            text, 
-            platform: "whatsapp",
-            messageId, 
-            timestamp: Date.now()
-          }, {
-            headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
-            timeout: 15000
-          }).catch(err => console.error("❌ Backend webhook failed:", err?.message));
-        });
-      } catch (err) {
-        console.error("❌ Message error:", err);
-      }
+    console.log(`📨 [${new Date().toISOString()}] Received from ${normalizedFrom}: ${text}`);
+
+    setImmediate(() => {
+      axios.post(`${BACKEND_URL}/webhook`, {
+        userId, 
+        from: normalizedFrom, // Sending the clean ID to your backend
+        text, 
+        platform: "whatsapp",
+        messageId: msg.key.id, 
+        timestamp: Date.now()
+      }, {
+        headers: { Authorization: `Bearer ${INTERNAL_API_KEY}` },
+        timeout: 15000
+      }).catch(err => console.error("❌ Backend webhook failed:", err?.message));
     });
   } catch (err) {
-    console.error(`❌ Session failed: ${userId}`, err);
+    console.error("❌ Message error:", err);
   }
-}
+});
+
 
 // ========================
 // ROUTES
