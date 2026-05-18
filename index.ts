@@ -377,95 +377,60 @@ async function createSession(
           // ========================
 setImmediate(() => {
 
-  axios.post(
+            axios.post(
 
-    `${BACKEND_URL}/webhook`,
+              `${BACKEND_URL}/webhook`,
 
-    {
-      userId,
-      from: normalizedFrom,
-      text,
-      platform: "whatsapp",
-      messageId,
-      timestamp,
-    },
+              {
+                userId,
+                from:
+                  normalizedFrom,
+                text,
+                platform:
+                  "whatsapp",
+                messageId,
+                timestamp,
+              },
 
-    {
-      headers: {
-        Authorization:
-          `Bearer ${INTERNAL_API_KEY}`
-      },
+              {
+                headers: {
+                  Authorization:
+                    `Bearer ${INTERNAL_API_KEY}`
+                },
 
-      timeout: 15000,
-    }
+                timeout: 15000,
+              }
 
-  )
+            ).catch(
+              (err: any) => {
 
-  .then(async (response) => {
+                console.error(
+                  "❌ Backend webhook failed:",
+                  err?.message || err
+                );
+              }
+            );
 
-    console.log(
-      "✅ Backend webhook delivered"
+          });
+
+        } catch (err) {
+
+          console.error(
+            "❌ Message error:",
+            err
+          );
+        }
+      }
     );
 
-    const aiReply =
-      response.data?.aiReply;
-
-    if (
-      aiReply &&
-      typeof aiReply === "string"
-    ) {
-
-      console.log(
-        `🤖 AI Reply: ${aiReply}`
-      );
-
-      await sessions[userId]
-        .sock
-        .sendMessage(
-          normalizedFrom,
-          {
-            text: aiReply
-          }
-        );
-
-      console.log(
-        `📤 Reply sent to ${normalizedFrom}`
-      );
-    }
-
-  })
-
-  .catch((err: any) => {
+  } catch (err) {
 
     console.error(
-      "❌ Backend webhook failed:",
-      err?.response?.data ||
-      err?.message ||
+      `❌ Session failed: ${userId}`,
       err
     );
-
-  });
-
-});
-      
-        } catch (err) {      
-      
-          console.error(      
-            "❌ Message error:",      
-            err      
-          );      
-        }      
-      }      
-    );      
-      
-  } catch (err) {      
-      
-    console.error(      
-      `❌ Session failed: ${userId}`,      
-      err      
-    );      
-  }      
-}      
+  }
+}
 
     // ========================
     // READ AI RESPONSE
