@@ -375,7 +375,8 @@ async function createSession(
           // ========================
           // WEBHOOK TO BACKEND
           // ========================
-setImmediate(() => {
+
+          setImmediate(() => {
 
             axios.post(
 
@@ -431,19 +432,6 @@ setImmediate(() => {
     );
   }
 }
-
-    // ========================
-    // READ AI RESPONSE
-    // ========================
-
-    const aiReply =
-      Response?.data?.aiReply;
-
-    if (
-      aiReply &&
-      typeof aiReply === "string"
-    ) {
-
 
 // ========================
 // CONNECT
@@ -696,4 +684,3 @@ app.listen(
     );
   }
 );
-    }
