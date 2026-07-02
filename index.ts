@@ -273,6 +273,41 @@ app.post("/send-message", async (req, res) => {
   }
 });
 
+// ========================
+// SEND MEDIA
+// ========================
+
+app.post("/send-media", async (req, res) => {
+  try {
+    const { userId, to, mediaUrl, caption } = req.body;
+
+    if (!userId || !to || !mediaUrl) {
+      return res.status(400).json({ error: "Missing fields: userId, to, mediaUrl" });
+    }
+
+    const session = sessions[userId];
+    if (!session?.connected) {
+      return res.status(404).json({ error: "Session not connected" });
+    }
+
+    const jid = normalizeJid(to);
+
+    await session.sock.sendMessage(jid, {
+      image: { url: mediaUrl },
+      caption: caption || "",
+    });
+
+    console.log(`📤 Media sent to ${jid}`);
+
+    res.json({ success: true, jid });
+  } catch (err: any) {
+    console.error("❌ Media send failed:", err);
+    res.status(500).json({
+      error: err?.message || "Media send failed"
+    });
+  }
+});
+
 app.post("/disconnect", async (req, res) => {
   const { userId } = req.body;
   const session = sessions[userId];
